@@ -1,6 +1,6 @@
 import { test } from "../fixtures/game.fixture.js";
 
-test.describe("Game start", () => {
+test.describe("Pixi.js game", () => {
   test("player can start the game", async ({ game, player }) => {
     await game.start(player.nickname);
     await game.waitUntilReady();
@@ -11,19 +11,27 @@ test.describe("Game start", () => {
   test("the Spin button can be located semantically", async ({ startedGame }) => {
     await startedGame.verifySpinButtonIsInteractable();
   });
-});
 
-test.describe("Spin", () => {
-  test("player wins a spin", async ({ startedGame }) => {
+  test("player completes a winning spin", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("win");
+
     await startedGame.spin();
-    await startedGame.verifyWin();
+
+    await startedGame.verifyAnimationStarted();
+    await startedGame.waitForAnimationCompleted();
+
+    await startedGame.verifyResult("win");
   });
 
-  test("player loses a spin", async ({ startedGame }) => {
+  test("player completes a losing spin", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("loss");
+
     await startedGame.spin();
-    await startedGame.verifyLoss();
+
+    await startedGame.verifyAnimationStarted();
+    await startedGame.waitForAnimationCompleted();
+
+    await startedGame.verifyResult("loss");
   });
 
   test("player sees an API error and can spin again afterward", async ({ startedGame }) => {
@@ -35,16 +43,16 @@ test.describe("Spin", () => {
     // not just reporting "error" while still stuck.
     await startedGame.setNextSpinResult("win");
     await startedGame.spin();
-    await startedGame.verifyWin();
+    await startedGame.verifyAnimationStarted();
+    await startedGame.waitForAnimationCompleted();
+    await startedGame.verifyResult("win");
   });
 
   test("a repeated spin click while already spinning is ignored", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("loss");
     await startedGame.verifyRepeatedSpinIsIgnored();
   });
-});
 
-test.describe("Technical regressions", () => {
   test("an unknown Pixi object produces a diagnosable failure", async ({ startedGame }) => {
     await startedGame.verifyUnknownObjectDiagnostics();
   });

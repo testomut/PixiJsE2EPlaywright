@@ -1,6 +1,6 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { PixiController } from "../support/PixiController.js";
-import type { SpinResult } from "../types/game.types.js";
+import type { GameResult, SpinResult } from "../types/game.types.js";
 import type { PixiObjectLabel } from "../types/pixi.types.js";
 
 const SPIN_API_PATTERN = "**/api/game/spin";
@@ -15,6 +15,13 @@ const SPIN_RESPONSES: Record<
   loss: { status: 200, body: { win: false, amount: 0, symbols: ["🍒", "🍋", "⭐"] } },
   error: { status: 500 },
 };
+
+// The exact copy GameApp.ts sets on its result label - confirmed by
+// reading the application source, not guessed. Kept next to
+// SPIN_RESPONSES since the win text is derived from the same amount.
+const WIN_TEXT = (amount: number) => `WIN! +$${amount}`;
+const LOSS_TEXT = "No win - try again!";
+const API_ERROR_TEXT = "Spin failed - please try again";
 
 /**
  * User-facing game behavior: navigation, DOM interaction, starting the
@@ -91,30 +98,38 @@ export class GamePage {
     expect(bounds.height).toBeGreaterThan(0);
   }
 
-  async verifyWin(): Promise<void> {
+  /** The spin animation has genuinely started - phase left "ready" for "spinning". */
+  async verifyAnimationStarted(): Promise<void> {
+    await this.pixi.waitForPhase("spinning");
+  }
+
+  /** The spin animation has genuinely finished - phase reached its final "result" state. */
+  async waitForAnimationCompleted(): Promise<void> {
     await this.pixi.waitForPhase("result");
+  }
+
+  /**
+   * Checks the complete win/loss outcome: phase, the structured result,
+   * the literal text shown to the player, and exact balance arithmetic -
+   * not just one of those in isolation. Assumes waitForAnimationCompleted()
+   * already ran; this only reads the settled snapshot.
+   */
+  async verifyResult(result: GameResult): Promise<void> {
     const snapshot = await this.pixi.getSnapshot();
     const balanceBefore = this.requireBalanceBeforeSpin();
+    const expectedBody = SPIN_RESPONSES[result].body;
 
+    expect(snapshot.phase).toBe("result");
     expect(
       snapshot.lastResult?.win,
-      `expected a win, got ${JSON.stringify(snapshot.lastResult)}`,
-    ).toBe(true);
+      `expected ${result}, got ${JSON.stringify(snapshot.lastResult)}`,
+    ).toBe(result === "win");
+    expect(snapshot.resultText).toBe(
+      result === "win" ? WIN_TEXT(expectedBody?.amount ?? 0) : LOSS_TEXT,
+    );
     expect(snapshot.balance).toBe(
       balanceBefore - snapshot.betAmount + (snapshot.lastResult?.amount ?? 0),
     );
-  }
-
-  async verifyLoss(): Promise<void> {
-    await this.pixi.waitForPhase("result");
-    const snapshot = await this.pixi.getSnapshot();
-    const balanceBefore = this.requireBalanceBeforeSpin();
-
-    expect(
-      snapshot.lastResult?.win,
-      `expected a loss, got ${JSON.stringify(snapshot.lastResult)}`,
-    ).toBe(false);
-    expect(snapshot.balance).toBe(balanceBefore - snapshot.betAmount);
   }
 
   async verifyApiError(): Promise<void> {
@@ -125,6 +140,7 @@ export class GamePage {
     // The spin never completed server-side, so the bet must be refunded -
     // not left deducted with no result to show for it.
     expect(snapshot.balance).toBe(balanceBefore);
+    expect(snapshot.resultText).toBe(API_ERROR_TEXT);
   }
 
   /** A click that lands while already spinning must not deduct the bet twice. */
@@ -193,7 +209,7 @@ export class GamePage {
   private requireBalanceBeforeSpin(): number {
     if (this.balanceBeforeSpin === null) {
       throw new Error(
-        "No balance recorded before this spin - verifyWin/verifyLoss/verifyApiError must be called after spin().",
+        "No balance recorded before this spin - verifyResult/verifyApiError must be called after spin().",
       );
     }
     return this.balanceBeforeSpin;
