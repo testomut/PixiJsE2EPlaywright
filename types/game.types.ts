@@ -36,3 +36,12 @@ export interface GameSnapshot {
   betAmount: number;
   lastResult: SpinOutcome | null;
 }
+
+/** The real HTTP response body from POST /api/game/spin - the same contract SpinOutcome models for the mocked path (see demo-app's vite.config.ts mock middleware). */
+export type SpinApiResponse = SpinOutcome;
+
+/** A real network result captured once by GamePage.spinWithRealApi() and checked separately by verifyRealSpinResponse(). */
+export interface SpinHttpResult {
+  status: number;
+  body: SpinApiResponse;
+}

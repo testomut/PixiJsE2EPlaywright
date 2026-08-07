@@ -69,6 +69,7 @@ test.describe("Pixi.js game", () => {
   });
 
   test("a real request reaches /api/game/spin", async ({ startedGame }) => {
-    await startedGame.verifyRealNetworkRequestSucceeds();
+    await startedGame.spinWithRealApi();
+    await startedGame.verifyRealSpinResponse();
   });
 });
