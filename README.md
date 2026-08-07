@@ -17,6 +17,18 @@ This project is part of a Pixi.js E2E testing series:
 
 ---
 
+## Demo
+
+<video src="docs/assets/pixi-e2e-demo.webm" controls width="480">
+  Your browser doesn't support inline video - <a href="docs/assets/pixi-e2e-demo.webm">download the recording</a> instead.
+</video>
+
+A real Playwright pointer click on the Spin button — a Pixi.js Canvas object, not a DOM element —
+triggering the spin animation, the reel content changing, the animation completing, and the final
+win result becoming visible. This is a genuine recording of the "player completes a winning spin"
+scenario (`e2e/game.spec.ts`), not a screen capture — see [Video recording](#video-recording) for
+how it was produced.
+
 ## Why normal DOM locators can't target Pixi objects
 
 The game is a small slot-style demo rendered entirely inside a single `<canvas>` element. Once the
@@ -47,7 +59,7 @@ e2e/game.spec.ts        every scenario - business-level method calls only
 fixtures/game.fixture.ts player, game, startedGame
 pages/GamePage.ts        user-facing flow + all assertions (verify*)
 support/PixiController.ts  the only Pixi/Canvas-specific code in this project
-types/game.types.ts      GamePhase, GameResult, SpinMockResult, Player, GameSnapshot
+types/game.types.ts      GamePhase, GameResult, SpinMockResult, Player, ReelSymbols, GameSnapshot
 types/pixi.types.ts      ButtonLabel/TextLabel/DisplayLabel, PixiObjectBounds, TestBridge
 playwright.config.ts
 ```
@@ -189,14 +201,29 @@ class PixiController {
   async waitUntilReady(): Promise<void>;
   async click(label: ButtonLabel): Promise<void>;
   async getBounds(label: PixiObjectLabel): Promise<PixiObjectBounds>;
+  async getObjectBoundsByRuntimeLabel(label: string): Promise<PixiObjectBounds>; // diagnostics only, see below
   async getText(label: TextLabel): Promise<string>;
-  async getReelSymbols(): Promise<string[]>;
+  async getReelSymbols(): Promise<ReelSymbols>; // readonly [string, string, string]
   async getSnapshot(): Promise<GameSnapshot>;
   async waitForPhase(phase: GamePhase): Promise<void>;
   async waitWhilePhase(phase: GamePhase): Promise<void>; // resolves once phase is no longer `phase`
-  async waitForReelChange(previous: readonly string[]): Promise<void>;
+  async waitForReelChange(previous: ReelSymbols): Promise<void>;
 }
 ```
+
+The game has exactly three reel positions, never an arbitrary-length list, so `ReelSymbols` is a
+`readonly [string, string, string]` tuple rather than `string[]`. The bridge itself still returns a
+plain `string[]` (it's the application's own untyped contract), so `getReelSymbols()` checks the
+length at runtime and throws `Expected exactly 3 reel symbols, received <count>` on a mismatch,
+rather than casting an arbitrary array straight to the tuple.
+
+`getObjectBoundsByRuntimeLabel()` exists for exactly one caller:
+`verifyUnknownObjectDiagnostics()`, which needs to prove the diagnostic error message for a label
+that (by definition) isn't a valid `PixiObjectLabel` - so it can't be expressed as one without an
+unsafe cast. Rather than widen `getBounds()`/`click()`/`getText()` to accept `string` (which would
+let a typo like `pixi.click("spinbutton")` compile everywhere), this one small, explicitly-named
+method is the only place a raw runtime string is accepted, and it shares its implementation with
+the typed `getBounds()` internally.
 
 `getObjectBounds()` returns bounds in **render space** (`canvas.width`/`canvas.height` pixel
 space, already resolved for anchor/pivot/scale/nested transforms by the application's own Pixi
@@ -245,7 +272,7 @@ declare global {
 ```
 
 `types/game.types.ts` holds the business/domain model (`GamePhase`, `GameResult`, `SpinMockResult`,
-`Player`, `GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts (the label
+`Player`, `ReelSymbols`, `GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts (the label
 categories, `PixiObjectBounds`) plus the bridge contract itself. `GameResult` (`'win' | 'loss'`) is
 `verifyResult()`'s parameter type; `SpinMockResult` (`GameResult | 'error'`) is wider, since
 `setNextSpinResult()` can also simulate a failed request that isn't a "result" in the same sense.
@@ -337,15 +364,39 @@ APP_BASE_URL=https://pixijs-e2e-testing-demo.vercel.app npm test
 
 ## Commands
 
-| Command                | What it does                                     |
-| ---------------------- | ------------------------------------------------ |
-| `npm run lint`         | ESLint                                           |
-| `npm run format:check` | Prettier check                                   |
-| `npm run typecheck`    | `tsc --noEmit`                                   |
-| `npm test`             | Runs the Playwright suite against `APP_BASE_URL` |
-| `npm run test:ui`      | Playwright's interactive UI mode                 |
-| `npm run test:headed`  | Runs headed, for local debugging                 |
-| `npm run test:report`  | Opens the last HTML report                       |
+| Command                | What it does                                                             |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `npm run lint`         | ESLint                                                                   |
+| `npm run format:check` | Prettier check                                                           |
+| `npm run typecheck`    | `tsc --noEmit`                                                           |
+| `npm test`             | Runs the Playwright suite against `APP_BASE_URL`                         |
+| `npm run test:ui`      | Playwright's interactive UI mode                                         |
+| `npm run test:headed`  | Runs headed, for local debugging                                         |
+| `npm run test:video`   | Same suite, records video for every test (not just failures) — see below |
+| `npm run test:report`  | Opens the last HTML report                                               |
+
+## Video recording
+
+Two distinct use cases, handled differently:
+
+**`npm test` (also what CI runs)** — diagnostic video only. `playwright.config.ts` sets
+`video: "retain-on-failure"`, so a passing test keeps no video and a failing one does. This is what
+CI uploads as a failure artifact (see [CI](#ci-why-a-local-checkout-not-the-deployed-demo)); it is
+not meant to produce anything worth watching for its own sake.
+
+**`npm run test:video`** — sets `RECORD_VIDEO=true` (cross-platform via `cross-env`, no second
+config file), which switches the same `video` option to `"on"`, so every test - including passing
+ones - gets a recording under `test-results/<test name>/video.webm`. This is how the curated demo
+clip below was produced: run it, then deliberately pick and copy one good recording - the command
+itself doesn't select or commit anything automatically.
+
+This is also why generated video only shows up locally or on CI's failure runs, never both: CI
+never sets `RECORD_VIDEO`, so a normal CI run - success or failure - never pays the cost of
+recording every test, only the ones that actually fail.
+
+**Generated artifact vs. committed demo** - `test-results/` and `playwright-report/` are gitignored
+(temporary, regenerated every run); `docs/assets/pixi-e2e-demo.webm` is the one deliberately
+selected, permanently committed exception - not covered by any wildcard `.webm` ignore rule.
 
 ## CI: why a local checkout, not the deployed demo
 
@@ -366,9 +417,10 @@ own code, not this project's.
 
 ## Diagnostics
 
-- **Screenshots** and **video** retained on failure, **trace** retained on failure
-  (`retain-on-failure`, so a first-attempt local failure with 0 retries still gets a trace) - all
-  uploaded as CI artifacts.
+- **Screenshots**, **video**, and **trace** all retained on failure (`retain-on-failure`, so a
+  first-attempt local failure with 0 retries still gets a trace) - all uploaded as CI artifacts.
+  See [Video recording](#video-recording) for the separate `test:video` path used only to produce
+  the curated demo clip, never run in CI.
 - `PixiController` errors include the requested label, canvas internal dimensions, canvas CSS
   dimensions, the current game phase, and the object bounds where available - never the whole Pixi
   stage.
