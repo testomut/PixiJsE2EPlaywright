@@ -45,11 +45,14 @@ spec (e2e/game.spec.ts)
   ↓
 fixture (game.fixture.ts)
   ↓
-GamePage           — user-facing flow, DOM interaction, and business assertions
-  ↓
-PixiController     — Canvas/Pixi mechanics: bounds, text, coordinate conversion, phase polling
-  ↓
-window.__TEST_APP__  — read-only observability bridge (owned by the application repo)
+GamePage — business/user flow, assertions, and the page's declared DOM/Pixi element surface
+  ↓                                      ↓
+PixiController                     ApiRequests
+Canvas/Pixi mechanics: bounds,     Network mechanics: response
+text, coordinate conversion,       observation, mocking, JSON
+phase polling                      parsing
+  ↓                                      ↓
+window.__TEST_APP__ (read-only)     /api/game/spin
   ↓
 Pixi.js application
 ```
@@ -57,16 +60,17 @@ Pixi.js application
 ```
 e2e/game.spec.ts        every scenario - business-level method calls only
 fixtures/game.fixture.ts player, game, startedGame
-pages/GamePage.ts        user-facing flow + all assertions (verify*)
+pages/GamePage.ts        declared DOM selectors + typed Pixi elements, user-facing flow, all assertions (verify*)
 support/PixiController.ts  the only Pixi/Canvas-specific code in this project
-types/game.types.ts      GamePhase, GameResult, SpinMockResult, Player, ReelSymbols, GameSnapshot
+support/ApiRequests.ts   the only network-specific code in this project
+types/game.types.ts      GamePhase, GameResult, SpinMockResult, Player, ReelSymbols, SpinApiResponse, SpinHttpResult, GameSnapshot
 types/pixi.types.ts      ButtonLabel/TextLabel/DisplayLabel, PixiObjectBounds, TestBridge
 playwright.config.ts
 ```
 
 No separate `assertions/`, `drivers/`, `data/`, or `utils/` layers - those responsibilities live in
-the files above: assertions in `GamePage`'s `verify*` methods, driver mechanics in
-`PixiController`, the three mocked spin responses in a small typed constant inside `GamePage.ts`,
+the files above: assertions in `GamePage`'s `verify*` methods, Canvas/Pixi mechanics in
+`PixiController`, network mechanics (including the three mocked spin responses) in `ApiRequests`,
 diagnostics in a private `PixiController` method.
 
 ## Fixtures
@@ -141,6 +145,14 @@ Confirmed directly - both of these fail to typecheck:
 pixi.click("resultText"); // Argument of type '"resultText"' is not assignable to '"spinButton" | "betMinus" | "betPlus"'
 pixi.getText("spinButton"); // Argument of type '"spinButton"' is not assignable to '"balanceDisplay" | "stateDisplay" | "resultText"'
 ```
+
+`GamePage` declares its own element surface at the top of the class from these categories -
+`spinButton`/`betMinusButton`/`betPlusButton: ButtonLabel`, `balanceText`/`stateText`/`resultText:
+TextLabel`, `reelsDisplay: DisplayLabel` - plus DOM selectors (`nicknameInputSelector`,
+`startGameButtonSelector`, `canvasSelector`) for the two real HTML elements outside the canvas.
+Methods reference `this.spinButton` etc. rather than repeating string literals, so the page's full
+interactive surface is visible at a glance, the way a traditional Page Object declares its
+selectors up front.
 
 ## Reading Pixi text
 
@@ -272,40 +284,77 @@ declare global {
 ```
 
 `types/game.types.ts` holds the business/domain model (`GamePhase`, `GameResult`, `SpinMockResult`,
-`Player`, `ReelSymbols`, `GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts (the label
-categories, `PixiObjectBounds`) plus the bridge contract itself. `GameResult` (`'win' | 'loss'`) is
-`verifyResult()`'s parameter type; `SpinMockResult` (`GameResult | 'error'`) is wider, since
-`setNextSpinResult()` can also simulate a failed request that isn't a "result" in the same sense.
-`GameSnapshot` keeps the real `betAmount` and full `{win, amount, symbols}` `lastResult` shape
-(rather than collapsing it to a bare string) because exact balance-arithmetic verification is real,
-existing coverage - it does **not** duplicate displayed text (no `resultText` field); that's read
+`Player`, `ReelSymbols`, `SpinOutcome`, `SpinApiResponse`, `SpinHttpResult`, `GameSnapshot`);
+`types/pixi.types.ts` holds Pixi/Canvas-specific concepts (the label categories, `PixiObjectBounds`)
+plus the bridge contract itself. `GameResult` (`'win' | 'loss'`) is `verifyResult()`'s parameter
+type; `SpinMockResult` (`GameResult | 'error'`) is wider, since `setNextSpinResult()` can also
+simulate a failed request that isn't a "result" in the same sense. `SpinApiResponse` is an alias of
+`SpinOutcome` - the real, unmocked `/api/game/spin` response body is the same contract the mocked
+path already models, so it isn't redefined; `SpinHttpResult` pairs it with the captured HTTP status
+for `GamePage.spinWithRealApi()`/`verifyRealSpinResponse()`. `GameSnapshot` keeps the real
+`betAmount` and full `{win, amount, symbols}` `lastResult` shape (rather than collapsing it to a
+bare string) because exact balance-arithmetic verification is real, existing coverage - it does
+**not** duplicate displayed text (no `resultText` field); that's read
 separately via `getText()`, which is the more precise, reusable place for it.
 
-## Deterministic mocking
+## ApiRequests: network mechanics
+
+`support/ApiRequests.ts` is the only network-specific code in this project: the spin endpoint,
+response observation, deterministic mocking, and turning raw JSON into typed results. It knows
+nothing about Pixi/Canvas or business rules - `GamePage` owns those.
+
+```ts
+class ApiRequests {
+  readonly spinEndpoint: string;
+  waitForSpinResponse(): Promise<Response>;
+  async readSpinResponse(response: Response): Promise<SpinHttpResult>;
+  async mockNextSpin(result: SpinMockResult): Promise<void>;
+}
+```
+
+### Deterministic mocking
 
 ```ts
 await startedGame.setNextSpinResult("win"); // | "loss" | "error"
 ```
 
-Internally, `GamePage.setNextSpinResult()` intercepts `/api/game/spin` with `page.route()` and a
-fixed, typed response body - the same mechanism a test would use against any real backend. There's
-no `Math.random()` patching and no `forceWin()`-style shortcut on the bridge.
+`GamePage.setNextSpinResult()` delegates straight to `ApiRequests.mockNextSpin()`, which
+intercepts `spinEndpoint` with `page.route()` and a fixed, typed response body - the same mechanism
+a test would use against any real backend. There's no `Math.random()` patching and no
+`forceWin()`-style shortcut on the bridge.
 
 **This is deliberately a true one-shot mock.** `page.route()` does not replace a previously
 registered handler for the same pattern - each call stacks a new one, and only the most recently
 registered handler runs (confirmed directly: an "older" handler that isn't superseded is still
-reachable via `route.fallback()`). The handler here unroutes itself immediately after fulfilling -
+reachable via `route.fallback()`). The handler unroutes itself immediately after fulfilling -
 fulfill first, then unroute, since unrouting first makes Playwright auto-resolve the route and the
-subsequent `fulfill()` throws `"Route is already handled!"`. That makes `setNextSpinResult()`
-apply to exactly one request no matter how many times it's called in a test, rather than leaving
-every prior handler registered and merely shadowed.
+subsequent `fulfill()` throws `"Route is already handled!"`. That makes `mockNextSpin()` apply to
+exactly one request no matter how many times it's called in a test, rather than leaving every prior
+handler registered and merely shadowed.
+
+### Real network flow
+
+```ts
+await startedGame.spinWithRealApi();
+await startedGame.verifyRealSpinResponse();
+```
+
+Action and verification stay separate. `spinWithRealApi()` calls `ApiRequests.waitForSpinResponse()`
+_before_ the real Pixi click - a fast response could otherwise resolve before Playwright starts
+listening for it - clicks, then hands the raw response to `ApiRequests.readSpinResponse()` and
+stores the typed result; it contains no assertions. `readSpinResponse()` parses `response.json()`
+against a runtime type guard and throws if the shape doesn't match, rather than trusting `unknown`
+JSON. `verifyRealSpinResponse()` then checks only what parsing alone can't guarantee: the HTTP
+status, and that the real backend's `win`/`amount` fields actually agree - confirmed by reading
+both the app's dev-server mock and its Vercel serverless function: `win` is true exactly when
+`amount > 0`.
 
 ## State synchronization
 
 No `waitForTimeout()`, no manual `sleep()`, no arbitrary delays. Tests rely on:
 
 - Playwright's built-in auto-waiting for DOM actions;
-- `page.waitForResponse()` for a real (unmocked) network round trip;
+- `ApiRequests.waitForSpinResponse()` for a real (unmocked) network round trip;
 - `expect.poll()` inside `PixiController.waitForPhase()`/`waitWhilePhase()`/`waitForReelChange()`;
 - `page.waitForFunction()` to wait for the bridge to attach and report ready.
 
@@ -315,26 +364,27 @@ does internally.
 
 ## Scenarios
 
-10 tests, all under one `test.describe("Pixi.js game", ...)` in `e2e/game.spec.ts`:
+12 tests, all under one `test.describe("Pixi.js game", ...)` in `e2e/game.spec.ts`:
 
 **Business flow** — a player can start the game (nickname reaches the bridge, phase reaches
 `ready`); the Spin button resolves via its stable Pixi label with valid, visible, renderable
-bounds; a winning spin and a losing spin each let `spin()` prove the full animation lifecycle
-(phase reaches `"spinning"`, the reel symbols genuinely change, phase leaves `"spinning"`) before
-`verifyResult()` checks the settled phase + structured result + **actual displayed Pixi text** +
-exact balance arithmetic; a failed spin (triggered via `spinExpectingError()`, since the real error
-path has no animation to prove) refunds the bet, shows the real error text, and the game is
-genuinely spinnable again immediately afterward (proven by completing a real subsequent win, not
-just checking the error went away); a repeated click while already spinning doesn't deduct the bet
-twice.
+bounds; the reels display is visible on the game board; the bet amount can be adjusted with the
+real bet buttons; a winning spin and a losing spin each let `spin()` prove the full animation
+lifecycle (phase reaches `"spinning"`, the reel symbols genuinely change, phase leaves
+`"spinning"`) before `verifyResult()` checks the settled phase + structured result + **actual
+displayed Pixi text** + exact balance arithmetic; a failed spin (triggered via
+`spinExpectingError()`, since the real error path has no animation to prove) refunds the bet, shows
+the real error text, and the game is genuinely spinnable again immediately afterward (proven by
+completing a real subsequent win, not just checking the error went away); a repeated click while
+already spinning doesn't deduct the bet twice.
 
 **Technical regressions** — real coverage that doesn't read naturally as business behavior, using
 equally meaningful method names rather than forced business language: an unknown Pixi object
 throws a diagnosable error (requested label, canvas internal/CSS dimensions, current phase, known
 labels - never the whole Pixi stage); the Spin button remains clickable - including a full spin -
 when the canvas is CSS-scaled to half its render resolution; the Spin button's bounds stay stable
-across a full spin cycle; a real, unmocked request reaches `/api/game/spin` with the expected
-response shape.
+across a full spin cycle; a real, unmocked request reaches `/api/game/spin` (see [Real network
+flow](#real-network-flow)).
 
 One scenario from an earlier version of this project - a test proving DOM selectors can't find the
 Spin button - was intentionally dropped rather than ported. It didn't verify application
