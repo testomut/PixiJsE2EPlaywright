@@ -35,7 +35,7 @@ fixture (game.fixture.ts)
   ↓
 GamePage           — user-facing flow, DOM interaction, and business assertions
   ↓
-PixiController     — Canvas/Pixi mechanics: bounds, coordinate conversion, phase polling
+PixiController     — Canvas/Pixi mechanics: bounds, text, coordinate conversion, phase polling
   ↓
 window.__TEST_APP__  — read-only observability bridge (owned by the application repo)
   ↓
@@ -47,17 +47,15 @@ e2e/game.spec.ts        every scenario - business-level method calls only
 fixtures/game.fixture.ts player, game, startedGame
 pages/GamePage.ts        user-facing flow + all assertions (verify*)
 support/PixiController.ts  the only Pixi/Canvas-specific code in this project
-types/game.types.ts      GamePhase, SpinResult, Player, GameSnapshot
-types/pixi.types.ts      PixiObjectLabel, PixiObjectBounds, TestBridge
+types/game.types.ts      GamePhase, GameResult, SpinMockResult, Player, GameSnapshot
+types/pixi.types.ts      ButtonLabel/TextLabel/DisplayLabel, PixiObjectBounds, TestBridge
 playwright.config.ts
 ```
 
-This is intentionally flatter than an earlier version of this project, which had separate
-`assertions/`, `drivers/`, `data/`, and `utils/` layers. Those responsibilities didn't disappear —
-they moved: assertions into `GamePage`'s `verify*` methods, driver mechanics into
-`PixiController`, the handful of mocked spin responses into a small typed constant inside
-`GamePage.ts`, and diagnostics into a private `PixiController` method. Nothing was deleted without
-being kept somewhere; see [Scenarios](#scenarios) for exactly what still exists.
+No separate `assertions/`, `drivers/`, `data/`, or `utils/` layers - those responsibilities live in
+the files above: assertions in `GamePage`'s `verify*` methods, driver mechanics in
+`PixiController`, the three mocked spin responses in a small typed constant inside `GamePage.ts`,
+diagnostics in a private `PixiController` method.
 
 ## Fixtures
 
@@ -108,6 +106,80 @@ result + displayed text + balance checked together, not one implementation detai
 `expect(await startedGame.getResult()).toBe('win')` in the spec would leak the _shape_ of a "win"
 back into the test; `await startedGame.verifyResult('win')` doesn't.
 
+## Typed Pixi label categories
+
+Labels are grouped by what you can actually do with them, not one flat list mixing buttons, text,
+and displays:
+
+```ts
+export const BUTTON_LABELS = ["spinButton", "betMinus", "betPlus"] as const;
+export const TEXT_LABELS = ["balanceDisplay", "stateDisplay", "resultText"] as const;
+export const DISPLAY_LABELS = ["reelsDisplay"] as const;
+
+export type ButtonLabel = (typeof BUTTON_LABELS)[number];
+export type TextLabel = (typeof TEXT_LABELS)[number];
+export type DisplayLabel = (typeof DISPLAY_LABELS)[number];
+export type PixiObjectLabel = ButtonLabel | TextLabel | DisplayLabel;
+```
+
+`PixiController.click()` only accepts a `ButtonLabel`; `getText()` only accepts a `TextLabel`.
+Confirmed directly - both of these fail to typecheck:
+
+```ts
+pixi.click("resultText"); // Argument of type '"resultText"' is not assignable to '"spinButton" | "betMinus" | "betPlus"'
+pixi.getText("spinButton"); // Argument of type '"spinButton"' is not assignable to '"balanceDisplay" | "stateDisplay" | "resultText"'
+```
+
+## Reading Pixi text
+
+`balanceDisplay` and `stateDisplay` are `Container`s wrapping a private `Text` child with no prior
+public accessor; `resultText` is itself a raw Pixi `Text`. The application now exposes a small
+`.text` getter on the first two (mirroring the real `Text.text` property name) and a matching
+bridge method, `getObjectText(label)`, that duck-types for a `.text` string at runtime - since
+`namedObjects` is typed `Map<string, Container>` for `getObjectBounds()`'s sake, and `Container`
+itself has no `.text`, this needed one narrow, explicitly-commented type assertion in the
+application (not `any` - a runtime check against `unknown`). `PixiController.getText(label:
+TextLabel)` wraps it with a clear error if the label doesn't resolve to readable text.
+
+## How animation is actually detected
+
+Before touching `spin()`, the application was inspected directly rather than assumed:
+
+- `reelsDisplay` (the container) **never moves** during a spin - no x/y/scale/rotation/alpha
+  change. Only its three private child `Text` objects have their `.text` mutated, every 80ms then
+  200ms, until `spinAnimate()` settles them to the final symbols. So `phase === "spinning"` alone
+  only proves the app's internal state flag flipped - not that anything is visually happening.
+- The reel texts had no stable individual labels and weren't exposed anywhere. The smallest
+  read-only addition was a `getReelSymbols()` bridge method returning the three current symbols
+  (backed by a new `ReelsDisplay.getSymbols()`), and `PixiController.getReelSymbols()`/
+  `waitForReelChange(previous)` to read and poll it.
+
+`spin()` proves both boundaries explicitly:
+
+```ts
+async spin(): Promise<void> {
+  this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
+  const reelsBeforeClick = await this.pixi.getReelSymbols();
+
+  await this.pixi.click("spinButton");
+  await this.pixi.waitForPhase("spinning"); // app state says spinning
+  await this.pixi.waitForReelChange(reelsBeforeClick); // reels actually changed
+  await this.pixi.waitWhilePhase("spinning"); // spinning has genuinely ended
+}
+```
+
+This is a real, enforced requirement, not a comment: an earlier version that hardcoded a wait for
+`"result"` specifically (instead of "no longer spinning") **failed exactly as it should** when
+applied to a mocked API error - `GameApp.ts`'s catch block calls no `spinAnimate()` at all, so the
+error path can resolve faster than a single bridge round-trip can even observe `"spinning"`. That
+confirmed there's genuinely no animation to prove on that path, so triggering an error uses
+`spinExpectingError()` instead - a plain click with no animation assertion, synchronizing on
+`"error"` directly via `verifyApiError()`.
+
+No `animation` `GamePhase` was invented, and no `ANIMATION_LABELS` category was added - animation
+is a real property change on real objects (the reel texts), observed with the same
+`getReelSymbols()`/`waitForReelChange()` pair used everywhere else, not a new abstraction layer.
+
 ## PixiController and coordinate conversion
 
 `PixiController` is the **only** Pixi/Canvas-specific code in this project:
@@ -115,11 +187,14 @@ back into the test; `await startedGame.verifyResult('win')` doesn't.
 ```ts
 class PixiController {
   async waitUntilReady(): Promise<void>;
-  async click(label: PixiObjectLabel): Promise<void>;
+  async click(label: ButtonLabel): Promise<void>;
   async getBounds(label: PixiObjectLabel): Promise<PixiObjectBounds>;
+  async getText(label: TextLabel): Promise<string>;
+  async getReelSymbols(): Promise<string[]>;
   async getSnapshot(): Promise<GameSnapshot>;
   async waitForPhase(phase: GamePhase): Promise<void>;
   async waitWhilePhase(phase: GamePhase): Promise<void>; // resolves once phase is no longer `phase`
+  async waitForReelChange(previous: readonly string[]): Promise<void>;
 }
 ```
 
@@ -144,8 +219,9 @@ await page.mouse.click(browserX, browserY);
 ```
 
 No magic coordinates anywhere - every click is computed from live bounds at the moment the test
-runs. `verifyScaledCanvasInteraction()` proves this holds even when the canvas is displayed at
-half its render resolution via CSS (see [CSS-scaling regression](#scenarios) below).
+runs. `verifyScaledCanvasInteraction()` proves the whole chain - bounds validation, coordinate
+conversion, the real click, and the complete animation lifecycle - still holds when the canvas is
+displayed at half its render resolution via CSS, by simply calling `spin()` after resizing it.
 
 ## Strong typing
 
@@ -156,6 +232,8 @@ augmentation - no `as any` casts scattered through the code:
 interface TestBridge {
   isReady(): boolean;
   getObjectBounds(label: string): PixiObjectBounds | null;
+  getObjectText(label: string): string | null;
+  getReelSymbols(): string[];
   getGameSnapshot(): GameSnapshot;
 }
 
@@ -166,15 +244,15 @@ declare global {
 }
 ```
 
-`types/game.types.ts` holds the business/domain model (`GamePhase`, `SpinResult`, `GameResult`,
-`Player`, `GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts
-(`PixiObjectLabel`, `PixiObjectBounds`) plus the bridge contract itself. `GameSnapshot` keeps the
-real `betAmount` and full `{win, amount, symbols}` `lastResult` shape (rather than collapsing it to
-a bare `'win' | 'loss'`) because exact balance-arithmetic verification is real, existing coverage -
-`GameResult` (`'win' | 'loss'`) exists separately as `verifyResult()`'s parameter type, not as a
-replacement for `lastResult`. `GameSnapshot.resultText` mirrors the application's own addition of
-the same field - the literal string shown in the result label, confirmed by reading `GameApp.ts`
-directly rather than guessed.
+`types/game.types.ts` holds the business/domain model (`GamePhase`, `GameResult`, `SpinMockResult`,
+`Player`, `GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts (the label
+categories, `PixiObjectBounds`) plus the bridge contract itself. `GameResult` (`'win' | 'loss'`) is
+`verifyResult()`'s parameter type; `SpinMockResult` (`GameResult | 'error'`) is wider, since
+`setNextSpinResult()` can also simulate a failed request that isn't a "result" in the same sense.
+`GameSnapshot` keeps the real `betAmount` and full `{win, amount, symbols}` `lastResult` shape
+(rather than collapsing it to a bare string) because exact balance-arithmetic verification is real,
+existing coverage - it does **not** duplicate displayed text (no `resultText` field); that's read
+separately via `getText()`, which is the more precise, reusable place for it.
 
 ## Deterministic mocking
 
@@ -201,22 +279,12 @@ No `waitForTimeout()`, no manual `sleep()`, no arbitrary delays. Tests rely on:
 
 - Playwright's built-in auto-waiting for DOM actions;
 - `page.waitForResponse()` for a real (unmocked) network round trip;
-- `expect.poll()` inside `PixiController.waitForPhase()` to observe the bridge's
-  `GameSnapshot.phase`;
+- `expect.poll()` inside `PixiController.waitForPhase()`/`waitWhilePhase()`/`waitForReelChange()`;
 - `page.waitForFunction()` to wait for the bridge to attach and report ready.
 
-The spec never knows any of this is happening - it just calls `spin()` and `verifyResult()`.
-`spin()` owns the complete lifecycle of one spin as a single user action: it clicks, then proves
-the animation genuinely started (`PixiController.waitForPhase("spinning")`) before waiting for it
-to genuinely finish (`PixiController.waitWhilePhase("spinning")` - the symmetric "wait until no
-longer this phase" counterpart, since a spin can settle into either `"result"` or `"error"`). If
-the application ever skipped straight from `"ready"` to a final state, `spin()` would time out and
-fail - confirmed directly: an earlier version of this method that hardcoded a wait for `"result"`
-specifically did exactly that when applied to a mocked API error, because **the real error path
-has no animation step at all** (no `spinAnimate()` call in `GameApp.ts`'s catch block, unlike the
-~2.4s reel animation on success) - the mocked fetch can resolve faster than a single bridge
-round-trip can observe "spinning" at all. That's why triggering an error uses `attemptSpin()`
-instead - a plain click with no animation assertion, since there's no real animation to prove.
+The spec never knows any of this is happening - it just calls `spin()` and `verifyResult()`. See
+[How animation is actually detected](#how-animation-is-actually-detected) above for what `spin()`
+does internally.
 
 ## Scenarios
 
@@ -225,19 +293,21 @@ instead - a plain click with no animation assertion, since there's no real anima
 **Business flow** — a player can start the game (nickname reaches the bridge, phase reaches
 `ready`); the Spin button resolves via its stable Pixi label with valid, visible, renderable
 bounds; a winning spin and a losing spin each let `spin()` prove the full animation lifecycle
-(genuinely reaches `"spinning"`, genuinely leaves it) before `verifyResult()` checks the settled
-phase + structured result + **displayed result text** + exact balance arithmetic; a failed spin
-(triggered via `attemptSpin()`, since the real error path has no animation to prove) refunds the
-bet, shows the real error text, and the game is genuinely spinnable again immediately afterward
-(proven by completing a real subsequent win, not just checking the error went away); a repeated
-click while already spinning doesn't deduct the bet twice.
+(phase reaches `"spinning"`, the reel symbols genuinely change, phase leaves `"spinning"`) before
+`verifyResult()` checks the settled phase + structured result + **actual displayed Pixi text** +
+exact balance arithmetic; a failed spin (triggered via `spinExpectingError()`, since the real error
+path has no animation to prove) refunds the bet, shows the real error text, and the game is
+genuinely spinnable again immediately afterward (proven by completing a real subsequent win, not
+just checking the error went away); a repeated click while already spinning doesn't deduct the bet
+twice.
 
 **Technical regressions** — real coverage that doesn't read naturally as business behavior, using
 equally meaningful method names rather than forced business language: an unknown Pixi object
 throws a diagnosable error (requested label, canvas internal/CSS dimensions, current phase, known
-labels - never the whole Pixi stage); the Spin button remains clickable when the canvas is
-CSS-scaled to half its render resolution; the Spin button's bounds stay stable across a full spin
-cycle; a real, unmocked request reaches `/api/game/spin` with the expected response shape.
+labels - never the whole Pixi stage); the Spin button remains clickable - including a full spin -
+when the canvas is CSS-scaled to half its render resolution; the Spin button's bounds stay stable
+across a full spin cycle; a real, unmocked request reaches `/api/game/spin` with the expected
+response shape.
 
 One scenario from an earlier version of this project - a test proving DOM selectors can't find the
 Spin button - was intentionally dropped rather than ported. It didn't verify application
