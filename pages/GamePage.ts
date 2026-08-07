@@ -68,16 +68,10 @@ export class GamePage {
   }
 
   /**
-   * One complete user action: click, then prove the spin genuinely
-   * animates - both the phase reaching "spinning" AND the reel symbols
-   * actually changing (confirmed by inspecting the app: reelsDisplay
-   * itself never moves, only its child texts' content does, so phase
-   * alone can't prove a visual change happened) - before returning only
-   * once the animation has genuinely finished (phase leaves "spinning").
-   * Only valid for outcomes the real application actually animates - a
-   * mocked API error resolves before "spinning" becomes observable at
-   * all (confirmed by testing: the app's error path has no animation
-   * step), so triggering an error uses spinExpectingError() instead.
+   * Phase reaching "spinning" only proves the app's state flag flipped -
+   * reelsDisplay itself never moves, so waitForReelChange() proves the
+   * reels actually changed visually. The mocked error path never
+   * animates at all, so it uses spinExpectingError() instead.
    */
   async spin(): Promise<void> {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
@@ -89,12 +83,7 @@ export class GamePage {
     await this.pixi.waitWhilePhase("spinning");
   }
 
-  /**
-   * Clicks Spin without asserting an animation lifecycle. Exists
-   * specifically for the mocked-API-error scenario, where the real
-   * application has no observable "spinning" duration to prove - the
-   * caller synchronizes on "error" directly instead (see verifyApiError()).
-   */
+  /** No animation to prove on the error path - verifyApiError() synchronizes on "error" directly. */
   async spinExpectingError(): Promise<void> {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
     await this.pixi.click(this.spinButton);
@@ -139,12 +128,7 @@ export class GamePage {
     expect(bounds.height).toBeGreaterThan(0);
   }
 
-  /**
-   * Checks the complete win/loss outcome: phase, the structured result,
-   * the literal text shown to the player, and exact balance arithmetic -
-   * not just one of those in isolation. Assumes spin() already completed
-   * the full animation lifecycle; this only reads the settled snapshot.
-   */
+  /** Assumes spin() already completed the full animation lifecycle - this only reads the settled snapshot. */
   async verifyResult(result: GameResult): Promise<void> {
     const snapshot = await this.pixi.getSnapshot();
     const balanceBefore = this.requireBalanceBeforeSpin();
@@ -195,10 +179,8 @@ export class GamePage {
   }
 
   /**
-   * Spins through a real, unmocked network request and captures the
-   * result for verifyRealSpinResponse() - no assertions here, only the
-   * action. waitForSpinResponse() is registered before the click so a
-   * fast response can't resolve before Playwright starts listening for it.
+   * waitForSpinResponse() is registered before the click - a fast
+   * response could otherwise resolve before Playwright starts listening.
    */
   async spinWithRealApi(): Promise<void> {
     const responsePromise = this.apiRequests.waitForSpinResponse();
@@ -209,11 +191,9 @@ export class GamePage {
   }
 
   /**
-   * Verifies the response captured by spinWithRealApi() - call that
-   * first. The body's shape (win/amount/symbols) is already guaranteed
-   * by ApiRequests.readSpinResponse() at capture time, so this checks
-   * facts parsing alone can't: the HTTP status, and that win/amount
-   * actually agree per the app's own settlement rule.
+   * The response's shape is already guaranteed by
+   * ApiRequests.readSpinResponse() - this checks only what parsing
+   * can't: the HTTP status, and that win/amount actually agree.
    */
   async verifyRealSpinResponse(): Promise<void> {
     if (!this.lastSpinHttpResult) {
@@ -233,11 +213,7 @@ export class GamePage {
     expect(after).toEqual(before);
   }
 
-  /**
-   * Bounds validation, coordinate conversion, the real click, and the
-   * complete animation lifecycle must all still hold once the canvas is
-   * CSS-scaled to a different size than its render resolution.
-   */
+  /** The full click → coordinate-conversion → animation chain must still work when the canvas is CSS-scaled away from its render resolution. */
   async verifyScaledCanvasInteraction(): Promise<void> {
     await this.page.locator(this.canvasSelector).evaluate((el: HTMLCanvasElement) => {
       el.style.width = `${el.width / 2}px`;

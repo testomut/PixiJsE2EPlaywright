@@ -53,14 +53,10 @@ export class ApiRequests {
   }
 
   /**
-   * Overrides exactly the next request to spinEndpoint, so scenarios
-   * don't depend on the server's real random outcome. page.route() does
-   * not replace a previously registered handler for the same pattern -
-   * each call stacks a new one, and the handler must unroute itself
-   * (after fulfilling, not before - unrouting first makes Playwright
-   * auto-resolve the route and the fulfill() call throws) so this
-   * genuinely applies to exactly one request, however many times it's
-   * called.
+   * page.route() stacks handlers rather than replacing them, so the
+   * handler must unroute itself after fulfilling (not before - unrouting
+   * first makes Playwright auto-resolve the route and fulfill() throws).
+   * That's what makes this apply to exactly one request.
    */
   async mockNextSpin(result: SpinMockResult): Promise<void> {
     const response = SPIN_RESPONSES[result];

@@ -38,12 +38,10 @@ export class PixiController {
   }
 
   /**
-   * Runtime-checked counterpart to getBounds() for labels that genuinely
-   * cannot be known at compile time - e.g. diagnosing a stage that has
-   * drifted from the known label list. Not part of the typed
-   * production/test path: click()/getText()/getBounds() stay restricted
-   * to ButtonLabel/TextLabel/PixiObjectLabel, and callers should not
-   * reach for this just to avoid the compiler.
+   * For labels that genuinely can't be known at compile time (e.g.
+   * diagnosing a stage that has drifted from the known label list).
+   * click()/getText()/getBounds() stay typed - don't reach for this
+   * just to avoid the compiler.
    */
   async getObjectBoundsByRuntimeLabel(label: string): Promise<PixiObjectBounds> {
     return this.resolveBounds(label);
@@ -99,12 +97,9 @@ export class PixiController {
   }
 
   /**
-   * Clicks the center of a Pixi object's global bounds through a real
-   * pointer event. Only accepts ButtonLabel - clicking a text or display
-   * object would be meaningless, and TypeScript now rejects it statically.
-   * The bridge returns render-space bounds; converting them into browser
-   * viewport coordinates is this controller's responsibility, not the
-   * application's.
+   * The bridge returns render-space bounds; converting them into real
+   * browser viewport coordinates before the pointer event is this
+   * controller's responsibility, not the application's.
    */
   async click(label: ButtonLabel): Promise<void> {
     const bounds = await this.getBounds(label);
@@ -138,11 +133,6 @@ export class PixiController {
     await this.page.mouse.click(browserX, browserY);
   }
 
-  /**
-   * Reads the serializable text currently displayed by a Text-bearing
-   * object. Only accepts TextLabel - a button or the reels display isn't
-   * a single piece of text, and TypeScript now rejects it statically.
-   */
   async getText(label: TextLabel): Promise<string> {
     const text = await this.page.evaluate(
       (objectLabel) => window.__TEST_APP__?.getObjectText(objectLabel) ?? null,
@@ -156,13 +146,9 @@ export class PixiController {
   }
 
   /**
-   * The reels display's three current symbols. This is the only
-   * genuinely animated visual state in the application - reelsDisplay
-   * itself never moves, only its child texts' content changes - so it's
-   * exposed directly rather than generalized into a getDisplayState(label)
-   * that would have exactly one real caller. The bridge itself returns a
-   * plain string[] (it's the application's own untyped contract), so the
-   * length is checked at runtime rather than cast straight to the tuple.
+   * The bridge returns a plain string[] (the application's own untyped
+   * contract), so the length is checked at runtime rather than cast
+   * straight to the tuple.
    */
   async getReelSymbols(): Promise<ReelSymbols> {
     const symbols = await this.page.evaluate(() => window.__TEST_APP__?.getReelSymbols() ?? []);
@@ -215,11 +201,8 @@ export class PixiController {
   }
 
   /**
-   * Polls until the reel symbols differ from `previous` - proof that the
-   * spin animation is genuinely progressing visually, not just that a
-   * phase flag flipped. Confirmed by inspecting the application: reels
-   * change every 80-200ms while spinning, so this settles quickly when
-   * a real animation is running.
+   * Proof that the spin animation is genuinely progressing visually,
+   * not just that a phase flag flipped.
    */
   async waitForReelChange(previous: ReelSymbols, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
     try {
