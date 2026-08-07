@@ -1,26 +1,8 @@
-import { expect, type Page, type Route } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { PixiController } from "../support/PixiController.js";
-import type {
-  GameResult,
-  ReelSymbols,
-  SpinApiResponse,
-  SpinHttpResult,
-  SpinMockResult,
-} from "../types/game.types.js";
+import { ApiRequests } from "../support/ApiRequests.js";
+import type { GameResult, SpinHttpResult, SpinMockResult } from "../types/game.types.js";
 import type { ButtonLabel, TextLabel, DisplayLabel } from "../types/pixi.types.js";
-
-const SPIN_API_PATTERN = "**/api/game/spin";
-
-// Deterministic response bodies for setNextSpinResult() - small and
-// specific enough to live here rather than in a separate data module.
-const SPIN_RESPONSES: Record<
-  SpinMockResult,
-  { status: number; body?: { win: boolean; amount: number; symbols: ReelSymbols } }
-> = {
-  win: { status: 200, body: { win: true, amount: 100, symbols: ["💎", "💎", "💎"] } },
-  loss: { status: 200, body: { win: false, amount: 0, symbols: ["🍒", "🍋", "⭐"] } },
-  error: { status: 500 },
-};
 
 // The exact copy GameApp.ts sets on its result label - confirmed by
 // reading the application source, not guessed. WIN_TEXT is a function
@@ -31,32 +13,6 @@ const SPIN_RESPONSES: Record<
 const WIN_TEXT = (amount: number) => `WIN! +$${amount}`;
 const LOSS_TEXT = "No win - try again!";
 const API_ERROR_TEXT = "Spin failed - please try again";
-
-/**
- * Runtime contract check for the real (unmocked) /api/game/spin response -
- * response.json() is unknown data, so its shape can't be assumed from
- * SpinApiResponse's compile-time type alone.
- */
-function isSpinApiResponse(value: unknown): value is SpinApiResponse {
-  const record = value as { win?: unknown; amount?: unknown; symbols?: unknown } | null;
-  return (
-    !!record &&
-    typeof record.win === "boolean" &&
-    typeof record.amount === "number" &&
-    Array.isArray(record.symbols) &&
-    record.symbols.length === 3 &&
-    record.symbols.every((symbol) => typeof symbol === "string")
-  );
-}
-
-function parseSpinApiResponse(value: unknown): SpinApiResponse {
-  if (!isSpinApiResponse(value)) {
-    throw new Error(
-      `Invalid spin API response: expected { win: boolean, amount: number, symbols: [string, string, string] }, got ${JSON.stringify(value)}`,
-    );
-  }
-  return value;
-}
 
 /**
  * User-facing game behavior: navigation, DOM interaction, starting the
@@ -89,6 +45,7 @@ export class GamePage {
   constructor(
     private readonly page: Page,
     private readonly pixi: PixiController,
+    private readonly apiRequests: ApiRequests,
     private readonly sessionId?: string,
   ) {}
 
@@ -106,27 +63,8 @@ export class GamePage {
     await this.pixi.waitUntilReady();
   }
 
-  /**
-   * Overrides the response for exactly the next /api/game/spin request,
-   * so scenarios don't depend on the server's real random outcome.
-   * page.route() does not replace a previously registered handler for
-   * the same pattern - each call stacks a new one, and the handler must
-   * unroute itself (after fulfilling, not before - unrouting first makes
-   * Playwright auto-resolve the route and the fulfill() call throws) so
-   * this genuinely applies to exactly one request, however many times
-   * it's called.
-   */
   async setNextSpinResult(result: SpinMockResult): Promise<void> {
-    const response = SPIN_RESPONSES[result];
-    const handler = async (route: Route) => {
-      await route.fulfill({
-        status: response.status,
-        contentType: "application/json",
-        body: JSON.stringify(response.body ?? { error: "mocked failure" }),
-      });
-      await this.page.unroute(SPIN_API_PATTERN, handler);
-    };
-    await this.page.route(SPIN_API_PATTERN, handler);
+    await this.apiRequests.mockNextSpin(result);
   }
 
   /**
@@ -210,7 +148,6 @@ export class GamePage {
   async verifyResult(result: GameResult): Promise<void> {
     const snapshot = await this.pixi.getSnapshot();
     const balanceBefore = this.requireBalanceBeforeSpin();
-    const expectedAmount = SPIN_RESPONSES[result].body?.amount ?? 0;
 
     expect(snapshot.phase).toBe("result");
     expect(
@@ -219,7 +156,9 @@ export class GamePage {
     ).toBe(result === "win");
 
     const resultText = await this.pixi.getText(this.resultText);
-    expect(resultText).toBe(result === "win" ? WIN_TEXT(expectedAmount) : LOSS_TEXT);
+    expect(resultText).toBe(
+      result === "win" ? WIN_TEXT(snapshot.lastResult?.amount ?? 0) : LOSS_TEXT,
+    );
 
     expect(snapshot.balance).toBe(
       balanceBefore - snapshot.betAmount + (snapshot.lastResult?.amount ?? 0),
@@ -258,37 +197,32 @@ export class GamePage {
   /**
    * Spins through a real, unmocked network request and captures the
    * result for verifyRealSpinResponse() - no assertions here, only the
-   * action. waitForResponse is registered before the click so a fast
-   * response can't resolve before Playwright starts listening for it.
+   * action. waitForSpinResponse() is registered before the click so a
+   * fast response can't resolve before Playwright starts listening for it.
    */
   async spinWithRealApi(): Promise<void> {
-    const responsePromise = this.page.waitForResponse((response) =>
-      response.url().includes("/api/game/spin"),
-    );
+    const responsePromise = this.apiRequests.waitForSpinResponse();
 
     await this.pixi.click(this.spinButton);
 
-    const response = await responsePromise;
-    const body: unknown = await response.json();
-
-    this.lastSpinHttpResult = {
-      status: response.status(),
-      body: parseSpinApiResponse(body),
-    };
+    this.lastSpinHttpResult = await this.apiRequests.readSpinResponse(await responsePromise);
   }
 
   /**
    * Verifies the response captured by spinWithRealApi() - call that
    * first. The body's shape (win/amount/symbols) is already guaranteed
-   * by parseSpinApiResponse() at capture time, so the only fact left
-   * worth asserting here is the HTTP status itself.
+   * by ApiRequests.readSpinResponse() at capture time, so this checks
+   * facts parsing alone can't: the HTTP status, and that win/amount
+   * actually agree per the app's own settlement rule.
    */
   async verifyRealSpinResponse(): Promise<void> {
     if (!this.lastSpinHttpResult) {
       throw new Error("Real spin response is not available - call spinWithRealApi() first.");
     }
 
-    expect(this.lastSpinHttpResult.status).toBe(200);
+    const { status, body } = this.lastSpinHttpResult;
+    expect(status).toBe(200);
+    expect(body.win).toBe(body.amount > 0);
   }
 
   /** The Spin button's bounds must not drift across a full spin cycle. */

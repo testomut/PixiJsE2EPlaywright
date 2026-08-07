@@ -1,6 +1,7 @@
 import { test as baseTest } from "@playwright/test";
 import { GamePage } from "../pages/GamePage.js";
 import { PixiController } from "../support/PixiController.js";
+import { ApiRequests } from "../support/ApiRequests.js";
 import type { Player } from "../types/game.types.js";
 
 type Fixtures = {
@@ -21,7 +22,8 @@ export const test = baseTest.extend<Fixtures>({
   // validate the start/onboarding flow itself.
   game: async ({ page }, use, testInfo) => {
     const pixi = new PixiController(page);
-    const gamePage = new GamePage(page, pixi, `test-${testInfo.testId}`);
+    const apiRequests = new ApiRequests(page);
+    const gamePage = new GamePage(page, pixi, apiRequests, `test-${testInfo.testId}`);
     await gamePage.open();
     await use(gamePage);
   },
