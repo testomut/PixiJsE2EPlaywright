@@ -88,8 +88,6 @@ or `window.__TEST_APP__` directly. A test reads as a scenario:
 test("player completes a winning spin", async ({ startedGame }) => {
   await startedGame.setNextSpinResult("win");
   await startedGame.spin();
-  await startedGame.verifyAnimationStarted();
-  await startedGame.waitForAnimationCompleted();
   await startedGame.verifyResult("win");
 });
 ```
@@ -121,6 +119,7 @@ class PixiController {
   async getBounds(label: PixiObjectLabel): Promise<PixiObjectBounds>;
   async getSnapshot(): Promise<GameSnapshot>;
   async waitForPhase(phase: GamePhase): Promise<void>;
+  async waitWhilePhase(phase: GamePhase): Promise<void>; // resolves once phase is no longer `phase`
 }
 ```
 
@@ -206,20 +205,18 @@ No `waitForTimeout()`, no manual `sleep()`, no arbitrary delays. Tests rely on:
   `GameSnapshot.phase`;
 - `page.waitForFunction()` to wait for the bridge to attach and report ready.
 
-The spec never knows any of this is happening - it just calls `spin()`, `verifyAnimationStarted()`,
-`waitForAnimationCompleted()`, and `verifyResult()`. The main win/loss flow deliberately spells out
-the animation lifecycle as separate steps rather than hiding it inside one combined helper:
-
-```ts
-await startedGame.spin(); // real pointer click via PixiController
-await startedGame.verifyAnimationStarted(); // phase reached "spinning"
-await startedGame.waitForAnimationCompleted(); // phase reached "result"
-await startedGame.verifyResult("win"); // reads the now-settled snapshot
-```
-
-`verifyAnimationStarted()` and `waitForAnimationCompleted()` are both thin wrappers around
-`PixiController.waitForPhase()` - the point isn't new mechanics, it's making the spin's lifecycle
-visible in the test rather than buried inside a single opaque call.
+The spec never knows any of this is happening - it just calls `spin()` and `verifyResult()`.
+`spin()` owns the complete lifecycle of one spin as a single user action: it clicks, then proves
+the animation genuinely started (`PixiController.waitForPhase("spinning")`) before waiting for it
+to genuinely finish (`PixiController.waitWhilePhase("spinning")` - the symmetric "wait until no
+longer this phase" counterpart, since a spin can settle into either `"result"` or `"error"`). If
+the application ever skipped straight from `"ready"` to a final state, `spin()` would time out and
+fail - confirmed directly: an earlier version of this method that hardcoded a wait for `"result"`
+specifically did exactly that when applied to a mocked API error, because **the real error path
+has no animation step at all** (no `spinAnimate()` call in `GameApp.ts`'s catch block, unlike the
+~2.4s reel animation on success) - the mocked fetch can resolve faster than a single bridge
+round-trip can observe "spinning" at all. That's why triggering an error uses `attemptSpin()`
+instead - a plain click with no animation assertion, since there's no real animation to prove.
 
 ## Scenarios
 
@@ -227,13 +224,13 @@ visible in the test rather than buried inside a single opaque call.
 
 **Business flow** — a player can start the game (nickname reaches the bridge, phase reaches
 `ready`); the Spin button resolves via its stable Pixi label with valid, visible, renderable
-bounds; a winning spin and a losing spin each explicitly prove the animation starts
-(`verifyAnimationStarted()`), finishes (`waitForAnimationCompleted()`), and settles into the
-correct phase + structured result + **displayed result text** + exact balance arithmetic
-(`verifyResult()`); a failed spin refunds the bet, shows the real error text, and the game is
-genuinely spinnable again immediately afterward (proven by completing a real subsequent win, not
-just checking the error went away); a repeated click while already spinning doesn't deduct the bet
-twice.
+bounds; a winning spin and a losing spin each let `spin()` prove the full animation lifecycle
+(genuinely reaches `"spinning"`, genuinely leaves it) before `verifyResult()` checks the settled
+phase + structured result + **displayed result text** + exact balance arithmetic; a failed spin
+(triggered via `attemptSpin()`, since the real error path has no animation to prove) refunds the
+bet, shows the real error text, and the game is genuinely spinnable again immediately afterward
+(proven by completing a real subsequent win, not just checking the error went away); a repeated
+click while already spinning doesn't deduct the bet twice.
 
 **Technical regressions** — real coverage that doesn't read naturally as business behavior, using
 equally meaningful method names rather than forced business language: an unknown Pixi object
