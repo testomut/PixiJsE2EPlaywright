@@ -5,7 +5,10 @@ import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["**/node_modules/**", "playwright-report/**", "test-results/**"],
+    // "app/" is where CI checks out the separate application repository
+    // (see .github/workflows/e2e.yml) - it is not part of this project and
+    // must never be linted with this project's rules.
+    ignores: ["**/node_modules/**", "playwright-report/**", "test-results/**", "app/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
