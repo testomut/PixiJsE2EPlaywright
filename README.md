@@ -85,27 +85,30 @@ type Fixtures = {
 or `window.__TEST_APP__` directly. A test reads as a scenario:
 
 ```ts
-test("player wins a spin", async ({ startedGame }) => {
+test("player completes a winning spin", async ({ startedGame }) => {
   await startedGame.setNextSpinResult("win");
   await startedGame.spin();
-  await startedGame.verifyWin();
+  await startedGame.verifyAnimationStarted();
+  await startedGame.waitForAnimationCompleted();
+  await startedGame.verifyResult("win");
 });
 ```
 
 The reasoning: a spec file is the one artifact non-automation stakeholders might actually read. If
 it's full of coordinate math, route handlers, and raw `expect()` calls, it stops being readable as
 a description of behavior. Every technical concern - how a click is computed, how a response is
-mocked, what "won" actually means in terms of phase/balance/result - has exactly one home
-(`PixiController` or `GamePage`), so it's defined once and reused, not copy-pasted across specs.
+mocked, what "won" actually means in terms of phase/balance/result/displayed text - has exactly
+one home (`PixiController` or `GamePage`), so it's defined once and reused, not copy-pasted across
+specs.
 
 ## Why assertions live inside GamePage, not the spec
 
-`GamePage.verifyWin()`, `verifyLoss()`, `verifyApiError()`, etc. call Playwright's native `expect`
-internally. There's no separate `GameAssertions` class and no generic wrappers like
+`GamePage.verifyResult()`, `verifyApiError()`, etc. call Playwright's native `expect` internally.
+There's no separate `GameAssertions` class and no generic wrappers like
 `verifyVisible()`/`verifyEquals()` — each method expresses one specific business outcome (phase +
-result + balance checked together, not one implementation detail at a time). `expect(await
-startedGame.getResult()).toBe('win')` in the spec would leak the _shape_ of a "win" back into the
-test; `await startedGame.verifyWin()` doesn't.
+result + displayed text + balance checked together, not one implementation detail at a time).
+`expect(await startedGame.getResult()).toBe('win')` in the spec would leak the _shape_ of a "win"
+back into the test; `await startedGame.verifyResult('win')` doesn't.
 
 ## PixiController and coordinate conversion
 
@@ -164,11 +167,15 @@ declare global {
 }
 ```
 
-`types/game.types.ts` holds the business/domain model (`GamePhase`, `SpinResult`, `Player`,
-`GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts (`PixiObjectLabel`,
-`PixiObjectBounds`) plus the bridge contract itself. `GameSnapshot` keeps the real `betAmount` and
-full `{win, amount, symbols}` result shape (rather than collapsing to a bare `'win' | 'loss'`)
-because exact balance-arithmetic verification is real, existing test coverage this project keeps.
+`types/game.types.ts` holds the business/domain model (`GamePhase`, `SpinResult`, `GameResult`,
+`Player`, `GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts
+(`PixiObjectLabel`, `PixiObjectBounds`) plus the bridge contract itself. `GameSnapshot` keeps the
+real `betAmount` and full `{win, amount, symbols}` `lastResult` shape (rather than collapsing it to
+a bare `'win' | 'loss'`) because exact balance-arithmetic verification is real, existing coverage -
+`GameResult` (`'win' | 'loss'`) exists separately as `verifyResult()`'s parameter type, not as a
+replacement for `lastResult`. `GameSnapshot.resultText` mirrors the application's own addition of
+the same field - the literal string shown in the result label, confirmed by reading `GameApp.ts`
+directly rather than guessed.
 
 ## Deterministic mocking
 
@@ -199,28 +206,41 @@ No `waitForTimeout()`, no manual `sleep()`, no arbitrary delays. Tests rely on:
   `GameSnapshot.phase`;
 - `page.waitForFunction()` to wait for the bridge to attach and report ready.
 
-The spec never knows any of this is happening - it just calls `spin()` and `verifyWin()`.
+The spec never knows any of this is happening - it just calls `spin()`, `verifyAnimationStarted()`,
+`waitForAnimationCompleted()`, and `verifyResult()`. The main win/loss flow deliberately spells out
+the animation lifecycle as separate steps rather than hiding it inside one combined helper:
+
+```ts
+await startedGame.spin(); // real pointer click via PixiController
+await startedGame.verifyAnimationStarted(); // phase reached "spinning"
+await startedGame.waitForAnimationCompleted(); // phase reached "result"
+await startedGame.verifyResult("win"); // reads the now-settled snapshot
+```
+
+`verifyAnimationStarted()` and `waitForAnimationCompleted()` are both thin wrappers around
+`PixiController.waitForPhase()` - the point isn't new mechanics, it's making the spin's lifecycle
+visible in the test rather than buried inside a single opaque call.
 
 ## Scenarios
 
-10 tests in `e2e/game.spec.ts`, grouped by `describe`:
+10 tests, all under one `test.describe("Pixi.js game", ...)` in `e2e/game.spec.ts`:
 
-**Game start** — a player can start the game (nickname reaches the bridge, phase reaches `ready`);
-the Spin button resolves via its stable Pixi label with valid, visible, renderable bounds.
-
-**Spin** — deterministic win and loss (phase + result + exact balance arithmetic checked
-together); a failed spin refunds the bet, moves to an `error` phase, and the game is genuinely
-spinnable again immediately afterward (proven by completing a real subsequent win, not just
-checking the error went away); a repeated click while already spinning doesn't deduct the bet
+**Business flow** — a player can start the game (nickname reaches the bridge, phase reaches
+`ready`); the Spin button resolves via its stable Pixi label with valid, visible, renderable
+bounds; a winning spin and a losing spin each explicitly prove the animation starts
+(`verifyAnimationStarted()`), finishes (`waitForAnimationCompleted()`), and settles into the
+correct phase + structured result + **displayed result text** + exact balance arithmetic
+(`verifyResult()`); a failed spin refunds the bet, shows the real error text, and the game is
+genuinely spinnable again immediately afterward (proven by completing a real subsequent win, not
+just checking the error went away); a repeated click while already spinning doesn't deduct the bet
 twice.
 
-**Technical regressions** — scenarios that are real coverage but don't read naturally as business
-behavior, kept in their own `describe` block rather than forced into business language: an unknown
-Pixi object throws a diagnosable error (requested label, canvas internal/CSS dimensions, current
-phase, known labels - never the whole Pixi stage); the Spin button remains clickable when the
-canvas is CSS-scaled to half its render resolution; the Spin button's bounds stay stable across a
-full spin cycle; a real, unmocked request reaches `/api/game/spin` with the expected response
-shape.
+**Technical regressions** — real coverage that doesn't read naturally as business behavior, using
+equally meaningful method names rather than forced business language: an unknown Pixi object
+throws a diagnosable error (requested label, canvas internal/CSS dimensions, current phase, known
+labels - never the whole Pixi stage); the Spin button remains clickable when the canvas is
+CSS-scaled to half its render resolution; the Spin button's bounds stay stable across a full spin
+cycle; a real, unmocked request reaches `/api/game/spin` with the expected response shape.
 
 One scenario from an earlier version of this project - a test proving DOM selectors can't find the
 Spin button - was intentionally dropped rather than ported. It didn't verify application
