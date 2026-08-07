@@ -88,11 +88,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload Playwright traces
+      - name: Upload Playwright failure artifacts
+        # test-results/ holds per-test screenshots, traces, and - since
+        # `video: "retain-on-failure"` in playwright.config.ts - videos for
+        # exactly the tests that failed. RECORD_VIDEO is never set here, so
+        # a normal successful CI run never records video for every test.
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-traces
+          name: playwright-failure-artifacts
           path: test-results/
           if-no-files-found: ignore
           retention-days: 14

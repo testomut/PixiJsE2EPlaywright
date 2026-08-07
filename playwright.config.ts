@@ -25,7 +25,11 @@ export default defineConfig({
     // "retain-on-failure" (rather than "on-first-retry") also captures a
     // trace on a first-attempt failure locally, where retries are 0.
     trace: "retain-on-failure",
-    video: "retain-on-failure",
+    // Diagnostic default: only failed tests keep a video. RECORD_VIDEO=true
+    // (see the test:video script) switches to recording every run, for
+    // curating the portfolio demo clip - CI never sets this, so normal
+    // successful runs never retain video there.
+    video: process.env.RECORD_VIDEO === "true" ? "on" : "retain-on-failure",
   },
   projects: [
     {
