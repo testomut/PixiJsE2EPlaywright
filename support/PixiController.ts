@@ -1,5 +1,5 @@
 import { expect, type Page } from "@playwright/test";
-import type { GamePhase, GameSnapshot } from "../types/game.types.js";
+import type { GamePhase, GameSnapshot, ReelSymbols } from "../types/game.types.js";
 import type {
   ButtonLabel,
   TextLabel,
@@ -34,6 +34,22 @@ export class PixiController {
    * requested label and current app state when the object can't be used.
    */
   async getBounds(label: PixiObjectLabel): Promise<PixiObjectBounds> {
+    return this.resolveBounds(label);
+  }
+
+  /**
+   * Runtime-checked counterpart to getBounds() for labels that genuinely
+   * cannot be known at compile time - e.g. diagnosing a stage that has
+   * drifted from the known label list. Not part of the typed
+   * production/test path: click()/getText()/getBounds() stay restricted
+   * to ButtonLabel/TextLabel/PixiObjectLabel, and callers should not
+   * reach for this just to avoid the compiler.
+   */
+  async getObjectBoundsByRuntimeLabel(label: string): Promise<PixiObjectBounds> {
+    return this.resolveBounds(label);
+  }
+
+  private async resolveBounds(label: string): Promise<PixiObjectBounds> {
     const canvasLocator = this.page.locator("canvas");
     const canvasCount = await canvasLocator.count();
     if (canvasCount === 0) {
@@ -144,10 +160,16 @@ export class PixiController {
    * genuinely animated visual state in the application - reelsDisplay
    * itself never moves, only its child texts' content changes - so it's
    * exposed directly rather than generalized into a getDisplayState(label)
-   * that would have exactly one real caller.
+   * that would have exactly one real caller. The bridge itself returns a
+   * plain string[] (it's the application's own untyped contract), so the
+   * length is checked at runtime rather than cast straight to the tuple.
    */
-  async getReelSymbols(): Promise<string[]> {
-    return this.page.evaluate(() => window.__TEST_APP__?.getReelSymbols() ?? []);
+  async getReelSymbols(): Promise<ReelSymbols> {
+    const symbols = await this.page.evaluate(() => window.__TEST_APP__?.getReelSymbols() ?? []);
+    if (symbols.length !== 3) {
+      throw new Error(`Expected exactly 3 reel symbols, received ${symbols.length}`);
+    }
+    return [symbols[0], symbols[1], symbols[2]];
   }
 
   async getSnapshot(): Promise<GameSnapshot> {
@@ -199,10 +221,7 @@ export class PixiController {
    * change every 80-200ms while spinning, so this settles quickly when
    * a real animation is running.
    */
-  async waitForReelChange(
-    previous: readonly string[],
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-  ): Promise<void> {
+  async waitForReelChange(previous: ReelSymbols, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
     try {
       await expect.poll(() => this.getReelSymbols(), { timeout: timeoutMs }).not.toEqual(previous);
     } catch (error) {
@@ -214,7 +233,7 @@ export class PixiController {
     }
   }
 
-  private async describeFailure(label?: PixiObjectLabel): Promise<string> {
+  private async describeFailure(label?: string): Promise<string> {
     const canvasLocator = this.page.locator("canvas");
     const canvasBox = await canvasLocator.boundingBox().catch(() => null);
     const canvasSize = await canvasLocator

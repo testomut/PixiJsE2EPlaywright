@@ -1,7 +1,6 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { PixiController } from "../support/PixiController.js";
-import type { GameResult, SpinMockResult } from "../types/game.types.js";
-import type { PixiObjectLabel } from "../types/pixi.types.js";
+import type { GameResult, ReelSymbols, SpinMockResult } from "../types/game.types.js";
 
 const SPIN_API_PATTERN = "**/api/game/spin";
 
@@ -9,7 +8,7 @@ const SPIN_API_PATTERN = "**/api/game/spin";
 // specific enough to live here rather than in a separate data module.
 const SPIN_RESPONSES: Record<
   SpinMockResult,
-  { status: number; body?: { win: boolean; amount: number; symbols: string[] } }
+  { status: number; body?: { win: boolean; amount: number; symbols: ReelSymbols } }
 > = {
   win: { status: 200, body: { win: true, amount: 100, symbols: ["💎", "💎", "💎"] } },
   loss: { status: 200, body: { win: false, amount: 0, symbols: ["🍒", "🍋", "⭐"] } },
@@ -225,8 +224,7 @@ export class GamePage {
 
   /** An unknown Pixi object must fail with a useful, non-generic error. */
   async verifyUnknownObjectDiagnostics(): Promise<void> {
-    const unknownLabel = "thisObjectDoesNotExist" as PixiObjectLabel;
-    await expect(this.pixi.getBounds(unknownLabel)).rejects.toThrow(
+    await expect(this.pixi.getObjectBoundsByRuntimeLabel("thisObjectDoesNotExist")).rejects.toThrow(
       /thisObjectDoesNotExist" was not found on the stage/,
     );
   }

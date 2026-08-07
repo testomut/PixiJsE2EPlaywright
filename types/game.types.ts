@@ -14,11 +14,14 @@ export interface Player {
   nickname: string;
 }
 
+/** The game has exactly three reel positions - never an arbitrary-length list. */
+export type ReelSymbols = readonly [string, string, string];
+
 /** The concrete outcome of a completed spin, as returned by the real API. */
 export interface SpinOutcome {
   win: boolean;
   amount: number;
-  symbols: string[];
+  symbols: ReelSymbols;
 }
 
 // Includes betAmount and the full SpinOutcome (not just a 'win'/'loss'
