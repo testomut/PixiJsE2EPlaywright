@@ -1,6 +1,7 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { PixiController } from "../support/PixiController.js";
 import type { GameResult, ReelSymbols, SpinMockResult } from "../types/game.types.js";
+import type { ButtonLabel, TextLabel, DisplayLabel } from "../types/pixi.types.js";
 
 const SPIN_API_PATTERN = "**/api/game/spin";
 
@@ -32,6 +33,24 @@ const API_ERROR_TEXT = "Spin failed - please try again";
  * math or scene traversal happens here.
  */
 export class GamePage {
+  // DOM selectors
+  public readonly nicknameInputSelector: string = "#player-name";
+  public readonly startGameButtonSelector: string = "#start-btn";
+  public readonly canvasSelector: string = "canvas";
+
+  // Pixi buttons
+  public readonly spinButton: ButtonLabel = "spinButton";
+  public readonly betMinusButton: ButtonLabel = "betMinus";
+  public readonly betPlusButton: ButtonLabel = "betPlus";
+
+  // Pixi text elements
+  public readonly balanceText: TextLabel = "balanceDisplay";
+  public readonly stateText: TextLabel = "stateDisplay";
+  public readonly resultText: TextLabel = "resultText";
+
+  // Pixi display elements
+  public readonly reelsDisplay: DisplayLabel = "reelsDisplay";
+
   private balanceBeforeSpin: number | null = null;
 
   constructor(
@@ -46,8 +65,8 @@ export class GamePage {
   }
 
   async start(nickname: string): Promise<void> {
-    await this.page.locator("#player-name").fill(nickname);
-    await this.page.locator("#start-btn").click();
+    await this.page.locator(this.nicknameInputSelector).fill(nickname);
+    await this.page.locator(this.startGameButtonSelector).click();
   }
 
   async waitUntilReady(): Promise<void> {
@@ -93,7 +112,7 @@ export class GamePage {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
     const reelsBeforeClick = await this.pixi.getReelSymbols();
 
-    await this.pixi.click("spinButton");
+    await this.pixi.click(this.spinButton);
     await this.pixi.waitForPhase("spinning");
     await this.pixi.waitForReelChange(reelsBeforeClick);
     await this.pixi.waitWhilePhase("spinning");
@@ -107,7 +126,7 @@ export class GamePage {
    */
   async spinExpectingError(): Promise<void> {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
-    await this.pixi.click("spinButton");
+    await this.pixi.click(this.spinButton);
   }
 
   async verifyReady(): Promise<void> {
@@ -121,7 +140,7 @@ export class GamePage {
   }
 
   async verifySpinButtonIsInteractable(): Promise<void> {
-    const bounds = await this.pixi.getBounds("spinButton");
+    const bounds = await this.pixi.getBounds(this.spinButton);
     expect(bounds.visible).toBe(true);
     expect(bounds.renderable).toBe(true);
     expect(bounds.width).toBeGreaterThan(0);
@@ -145,7 +164,7 @@ export class GamePage {
       `expected ${result}, got ${JSON.stringify(snapshot.lastResult)}`,
     ).toBe(result === "win");
 
-    const resultText = await this.pixi.getText("resultText");
+    const resultText = await this.pixi.getText(this.resultText);
     expect(resultText).toBe(result === "win" ? WIN_TEXT(expectedAmount) : LOSS_TEXT);
 
     expect(snapshot.balance).toBe(
@@ -162,20 +181,20 @@ export class GamePage {
     // not left deducted with no result to show for it.
     expect(snapshot.balance).toBe(balanceBefore);
 
-    const resultText = await this.pixi.getText("resultText");
+    const resultText = await this.pixi.getText(this.resultText);
     expect(resultText).toBe(API_ERROR_TEXT);
   }
 
   /** A click that lands while already spinning must not deduct the bet twice. */
   async verifyRepeatedSpinIsIgnored(): Promise<void> {
     const before = await this.pixi.getSnapshot();
-    await this.pixi.click("spinButton");
+    await this.pixi.click(this.spinButton);
     await this.pixi.waitForPhase("spinning");
 
     // The button's eventMode is "none" while spinning, so Pixi won't
     // route this click to the spin handler - if it somehow did, the bet
     // would be deducted twice.
-    await this.pixi.click("spinButton");
+    await this.pixi.click(this.spinButton);
 
     await this.pixi.waitForPhase("ready");
     const after = await this.pixi.getSnapshot();
@@ -187,7 +206,7 @@ export class GamePage {
     const responsePromise = this.page.waitForResponse((res) =>
       res.url().includes("/api/game/spin"),
     );
-    await this.pixi.click("spinButton");
+    await this.pixi.click(this.spinButton);
     const response = await responsePromise;
 
     expect(response.status()).toBe(200);
@@ -199,9 +218,9 @@ export class GamePage {
 
   /** The Spin button's bounds must not drift across a full spin cycle. */
   async verifyButtonPositionStableAcrossSpin(): Promise<void> {
-    const before = await this.pixi.getBounds("spinButton");
+    const before = await this.pixi.getBounds(this.spinButton);
     await this.spin();
-    const after = await this.pixi.getBounds("spinButton");
+    const after = await this.pixi.getBounds(this.spinButton);
     expect(after).toEqual(before);
   }
 
@@ -211,12 +230,12 @@ export class GamePage {
    * CSS-scaled to a different size than its render resolution.
    */
   async verifyScaledCanvasInteraction(): Promise<void> {
-    await this.page.locator("canvas").evaluate((el: HTMLCanvasElement) => {
+    await this.page.locator(this.canvasSelector).evaluate((el: HTMLCanvasElement) => {
       el.style.width = `${el.width / 2}px`;
       el.style.height = `${el.height / 2}px`;
     });
 
-    const bounds = await this.pixi.getBounds("spinButton");
+    const bounds = await this.pixi.getBounds(this.spinButton);
     expect(bounds.width).toBeGreaterThan(0);
 
     await this.spin();
