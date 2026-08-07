@@ -75,7 +75,31 @@ export class GamePage {
     await this.page.route(SPIN_API_PATTERN, handler);
   }
 
+  /**
+   * One complete user action: click, then prove the spin genuinely
+   * animates (phase reaches "spinning") before returning only once it
+   * has actually finished (phase leaves "spinning" again). Only valid
+   * for outcomes the real application actually animates - confirmed by
+   * testing, a mocked API error resolves the fetch before the "spinning"
+   * phase becomes observable at all (the app's error path has no
+   * animation step, unlike win/loss's ~2.4s reel animation), so
+   * triggering an error goes through attemptSpin() instead.
+   */
   async spin(): Promise<void> {
+    this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
+    await this.pixi.click("spinButton");
+    await this.pixi.waitForPhase("spinning");
+    await this.pixi.waitWhilePhase("spinning");
+  }
+
+  /**
+   * Clicks Spin without asserting an animation lifecycle. Exists
+   * specifically for scenarios (a mocked API error) where the real
+   * application has no observable "spinning" duration to prove - the
+   * caller synchronizes on whatever it actually expects next instead
+   * (see verifyApiError()).
+   */
+  async attemptSpin(): Promise<void> {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
     await this.pixi.click("spinButton");
   }
@@ -98,21 +122,11 @@ export class GamePage {
     expect(bounds.height).toBeGreaterThan(0);
   }
 
-  /** The spin animation has genuinely started - phase left "ready" for "spinning". */
-  async verifyAnimationStarted(): Promise<void> {
-    await this.pixi.waitForPhase("spinning");
-  }
-
-  /** The spin animation has genuinely finished - phase reached its final "result" state. */
-  async waitForAnimationCompleted(): Promise<void> {
-    await this.pixi.waitForPhase("result");
-  }
-
   /**
    * Checks the complete win/loss outcome: phase, the structured result,
    * the literal text shown to the player, and exact balance arithmetic -
-   * not just one of those in isolation. Assumes waitForAnimationCompleted()
-   * already ran; this only reads the settled snapshot.
+   * not just one of those in isolation. Assumes spin() already completed
+   * the full animation lifecycle; this only reads the settled snapshot.
    */
   async verifyResult(result: GameResult): Promise<void> {
     const snapshot = await this.pixi.getSnapshot();
@@ -209,7 +223,7 @@ export class GamePage {
   private requireBalanceBeforeSpin(): number {
     if (this.balanceBeforeSpin === null) {
       throw new Error(
-        "No balance recorded before this spin - verifyResult/verifyApiError must be called after spin().",
+        "No balance recorded before this spin - verifyResult/verifyApiError must be called after spin()/attemptSpin().",
       );
     }
     return this.balanceBeforeSpin;

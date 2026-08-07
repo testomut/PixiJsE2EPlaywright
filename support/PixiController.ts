@@ -149,6 +149,25 @@ export class PixiController {
     }
   }
 
+  /**
+   * Polls until the game phase is no longer `phase` - the symmetric
+   * counterpart to waitForPhase(), used to detect that a phase has
+   * finished without assuming which phase it settles into next (e.g. a
+   * spin can end in either "result" or "error").
+   */
+  async waitWhilePhase(phase: GamePhase, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
+    try {
+      await expect
+        .poll(() => this.getSnapshot().then((snapshot) => snapshot.phase), { timeout: timeoutMs })
+        .not.toBe(phase);
+    } catch (error) {
+      const diagnostics = await this.describeFailure();
+      throw new Error(`Timed out waiting to leave phase "${phase}".\n${diagnostics}`, {
+        cause: error,
+      });
+    }
+  }
+
   private async describeFailure(label?: PixiObjectLabel): Promise<string> {
     const canvasLocator = this.page.locator("canvas");
     const canvasBox = await canvasLocator.boundingBox().catch(() => null);

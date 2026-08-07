@@ -14,37 +14,25 @@ test.describe("Pixi.js game", () => {
 
   test("player completes a winning spin", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("win");
-
     await startedGame.spin();
-
-    await startedGame.verifyAnimationStarted();
-    await startedGame.waitForAnimationCompleted();
-
     await startedGame.verifyResult("win");
   });
 
   test("player completes a losing spin", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("loss");
-
     await startedGame.spin();
-
-    await startedGame.verifyAnimationStarted();
-    await startedGame.waitForAnimationCompleted();
-
     await startedGame.verifyResult("loss");
   });
 
   test("player sees an API error and can spin again afterward", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("error");
-    await startedGame.spin();
+    await startedGame.attemptSpin();
     await startedGame.verifyApiError();
 
     // A fresh mocked response proves the game is genuinely usable again,
     // not just reporting "error" while still stuck.
     await startedGame.setNextSpinResult("win");
     await startedGame.spin();
-    await startedGame.verifyAnimationStarted();
-    await startedGame.waitForAnimationCompleted();
     await startedGame.verifyResult("win");
   });
 
