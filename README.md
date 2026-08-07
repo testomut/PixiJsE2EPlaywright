@@ -1,14 +1,14 @@
 # Pixi.js E2E Automation — Playwright
 
-A dedicated Playwright test-automation project for the Pixi.js/Canvas demo game in
+A small, strongly typed Playwright test-automation project for the Pixi.js/Canvas demo game in
 [testomut/pixijs-e2e-testing-demo](https://github.com/testomut/pixijs-e2e-testing-demo). This
-repository contains **only** the Playwright automation — no application source, no Cypress. It's
-the second entry in a two-repository split: this project proves a Canvas/Pixi application can be
-tested reliably with a proper driver/page-object architecture, without owning any game code.
+repository contains **only** the Playwright automation — no application source, no Cypress. Tests
+read as business scenarios; every Canvas/Pixi mechanic and every assertion is hidden behind a
+small, deliberately narrow API.
 
 **Application repository:** https://github.com/testomut/pixijs-e2e-testing-demo
-**Live demo:** https://pixijs-e2e-testing-demo.vercel.app (see [Limitations](#limitations) — this
-CI does not test the deployed build)
+**Live demo:** https://pixijs-e2e-testing-demo.vercel.app (see [Limitations](#limitations) — CI
+does not test the deployed build)
 
 This project is part of a Pixi.js E2E testing series:
 
@@ -23,19 +23,19 @@ The game is a small slot-style demo rendered entirely inside a single `<canvas>`
 player starts the game, everything — the Spin button, balance, reels, result text — is drawn
 pixels on that canvas. `page.getByRole(...)`, `page.getByText(...)`, and CSS selectors all return
 nothing for it, because there's no DOM node to find. The only way to interact with it reliably is
-through structured information the application chooses to expose, and a real pointer click at the
-right screen coordinates.
+through structured information the application chooses to expose (`window.__TEST_APP__`), and a
+real pointer click at the right screen coordinates.
 
 ## Architecture
 
 ```
-spec
+spec (e2e/game.spec.ts)
   ↓
 fixture (game.fixture.ts)
   ↓
-GamePage          — user-facing flow and DOM interaction
+GamePage           — user-facing flow, DOM interaction, and business assertions
   ↓
-PixiDriver        — Canvas/Pixi mechanics: bounds, coordinate conversion, phase polling
+PixiController     — Canvas/Pixi mechanics: bounds, coordinate conversion, phase polling
   ↓
 window.__TEST_APP__  — read-only observability bridge (owned by the application repo)
   ↓
@@ -43,97 +43,189 @@ Pixi.js application
 ```
 
 ```
-e2e/                     game-start.spec.ts, game-spin.spec.ts, game-errors.spec.ts
-fixtures/game.fixture.ts fixture wiring: gamePage, pixiDriver, gameAssertions
-page-objects/GamePage.ts user-facing flow (open, startGameFor, spin, mockNextSpin)
-drivers/PixiDriver.ts    Canvas/Pixi mechanics (bounds, click, phase waits, diagnostics)
-assertions/GameAssertions.ts  domain checks (winning/losing result, recovery, single spin)
-data/gameTestData.ts     typed win/loss/error response fixtures
-types/pixiTestBridge.ts  the bridge shape, mirrored from the application repo
-utils/diagnostics.ts     known-label list + failure-diagnostics helper
+e2e/game.spec.ts        every scenario - business-level method calls only
+fixtures/game.fixture.ts player, game, startedGame
+pages/GamePage.ts        user-facing flow + all assertions (verify*)
+support/PixiController.ts  the only Pixi/Canvas-specific code in this project
+types/game.types.ts      GamePhase, SpinResult, Player, GameSnapshot
+types/pixi.types.ts      PixiObjectLabel, PixiObjectBounds, TestBridge
 playwright.config.ts
 ```
 
-**Responsibility split**, deliberately narrow:
+This is intentionally flatter than an earlier version of this project, which had separate
+`assertions/`, `drivers/`, `data/`, and `utils/` layers. Those responsibilities didn't disappear —
+they moved: assertions into `GamePage`'s `verify*` methods, driver mechanics into
+`PixiController`, the handful of mocked spin responses into a small typed constant inside
+`GamePage.ts`, and diagnostics into a private `PixiController` method. Nothing was deleted without
+being kept somewhere; see [Scenarios](#scenarios) for exactly what still exists.
 
-- **`GamePage`** owns the business-facing flow: opening the app, filling in the player name,
-  clicking Start, triggering a spin, mocking the network. It never does coordinate math.
-- **`PixiDriver`** owns Canvas/Pixi mechanics only: waiting for the bridge, resolving an object's
-  bounds, converting them to a browser click, polling game phase, and producing diagnosable
-  errors. It has no idea what a "winning result" or "expected balance" is.
-- **`GameAssertions`** expresses meaningful domain outcomes (phase + result + balance together),
-  not a thin wrapper around `expect()`.
+## Fixtures
 
-## The test bridge
+```ts
+type Fixtures = {
+  player: Player; // { nickname: string }
+  game: GamePage; // app opened, game NOT started
+  startedGame: GamePage; // game fixture + nickname entered + started + ready
+};
+```
 
-This repository does not define `window.__TEST_APP__` — it's owned and implemented by the
-application repository. This project only mirrors its type (`types/pixiTestBridge.ts`) and treats
-it strictly as **read-only observability**:
+- **`player`** creates a fresh `{ nickname: "player_<timestamp>" }` per test. The uniqueness is for
+  session isolation (each test gets its own `?session=` query param, so balance/state never leaks
+  between tests) — not for randomizing any outcome.
+- **`game`** opens the application but does **not** start it. This exists specifically for tests
+  that validate the start/onboarding flow itself — calling `start()`/`waitUntilReady()` from
+  inside the fixture would make that flow untestable.
+- **`startedGame`** depends on `game` and `player`: it enters the nickname, starts the game, and
+  waits until the Pixi scene reports ready, then hands the same `GamePage` to the test. It does
+  nothing beyond that — no mocking, no spinning, no unrelated setup.
+
+## Why tests contain only business methods
+
+`e2e/game.spec.ts` never calls `page.click`, `page.locator`, `page.mouse`, `page.route`, `expect`,
+or `window.__TEST_APP__` directly. A test reads as a scenario:
+
+```ts
+test("player wins a spin", async ({ startedGame }) => {
+  await startedGame.setNextSpinResult("win");
+  await startedGame.spin();
+  await startedGame.verifyWin();
+});
+```
+
+The reasoning: a spec file is the one artifact non-automation stakeholders might actually read. If
+it's full of coordinate math, route handlers, and raw `expect()` calls, it stops being readable as
+a description of behavior. Every technical concern - how a click is computed, how a response is
+mocked, what "won" actually means in terms of phase/balance/result - has exactly one home
+(`PixiController` or `GamePage`), so it's defined once and reused, not copy-pasted across specs.
+
+## Why assertions live inside GamePage, not the spec
+
+`GamePage.verifyWin()`, `verifyLoss()`, `verifyApiError()`, etc. call Playwright's native `expect`
+internally. There's no separate `GameAssertions` class and no generic wrappers like
+`verifyVisible()`/`verifyEquals()` — each method expresses one specific business outcome (phase +
+result + balance checked together, not one implementation detail at a time). `expect(await
+startedGame.getResult()).toBe('win')` in the spec would leak the _shape_ of a "win" back into the
+test; `await startedGame.verifyWin()` doesn't.
+
+## PixiController and coordinate conversion
+
+`PixiController` is the **only** Pixi/Canvas-specific code in this project:
+
+```ts
+class PixiController {
+  async waitUntilReady(): Promise<void>;
+  async click(label: PixiObjectLabel): Promise<void>;
+  async getBounds(label: PixiObjectLabel): Promise<PixiObjectBounds>;
+  async getSnapshot(): Promise<GameSnapshot>;
+  async waitForPhase(phase: GamePhase): Promise<void>;
+}
+```
+
+`getObjectBounds()` returns bounds in **render space** (`canvas.width`/`canvas.height` pixel
+space, already resolved for anchor/pivot/scale/nested transforms by the application's own Pixi
+`getBounds()` call). `getBounds()` validates those bounds against the canvas's actual render
+resolution - **not** its CSS bounding rect, which can differ under CSS scaling or a different
+device pixel ratio. `click()` then converts to a real browser click:
+
+```ts
+const rect = canvas.getBoundingClientRect();
+const scaleX = rect.width / canvas.width;
+const scaleY = rect.height / canvas.height;
+
+const renderX = bounds.x + bounds.width / 2;
+const renderY = bounds.y + bounds.height / 2;
+
+const browserX = rect.left + renderX * scaleX;
+const browserY = rect.top + renderY * scaleY;
+
+await page.mouse.click(browserX, browserY);
+```
+
+No magic coordinates anywhere - every click is computed from live bounds at the moment the test
+runs. `verifyScaledCanvasInteraction()` proves this holds even when the canvas is displayed at
+half its render resolution via CSS (see [CSS-scaling regression](#scenarios) below).
+
+## Strong typing
+
+`window.__TEST_APP__` is typed once, in `types/pixi.types.ts`, via a global `Window` interface
+augmentation - no `as any` casts scattered through the code:
 
 ```ts
 interface TestBridge {
   isReady(): boolean;
-  getObjectBounds(label: string): PixiObjectBounds | null; // {x,y,width,height,visible,renderable}
-  getGameSnapshot(): GameSnapshot; // {phase, playerName, balance, betAmount, lastResult}
+  getObjectBounds(label: string): PixiObjectBounds | null;
+  getGameSnapshot(): GameSnapshot;
+}
+
+declare global {
+  interface Window {
+    __TEST_APP__?: TestBridge;
+  }
 }
 ```
 
-No `stage`, no `renderer`, no whole `Application`, no `forceWin()`/`spin()`/mutable service. Every
-user action in these tests happens through the real DOM (`#player-name`, `#start-btn`) or a real
-canvas pointer click — never by calling an application method directly.
-
-## Coordinate conversion
-
-`getObjectBounds()` returns bounds in **render space** (`canvas.width`/`canvas.height` pixel
-space), already resolved for anchor/pivot/scale/nested transforms by the application's own Pixi
-`getBounds()` call. `PixiDriver` is responsible for two separate things:
-
-1. **Validating** those bounds against the canvas's actual render resolution
-   (`canvas.width`/`canvas.height`) — not its CSS bounding rect, which can differ under CSS
-   scaling or a different device pixel ratio.
-2. **Converting** to a browser click by reading `canvas.getBoundingClientRect()` and scaling:
-   ```ts
-   scaleX = canvasRect.width / canvas.width;
-   scaleY = canvasRect.height / canvas.height;
-   clickX = canvasRect.x + (bounds.x + bounds.width / 2) * scaleX;
-   clickY = canvasRect.y + (bounds.y + bounds.height / 2) * scaleY;
-   ```
-
-`the Spin button remains clickable when the canvas is CSS-scaled` (in `e2e/game-spin.spec.ts`)
-proves this end to end: it shrinks the canvas to half its render resolution via
-`el.style.width`/`height`, then confirms bounds validation, the click, and the resulting
-spinning→result phase transition all still work.
+`types/game.types.ts` holds the business/domain model (`GamePhase`, `SpinResult`, `Player`,
+`GameSnapshot`); `types/pixi.types.ts` holds Pixi/Canvas-specific concepts (`PixiObjectLabel`,
+`PixiObjectBounds`) plus the bridge contract itself. `GameSnapshot` keeps the real `betAmount` and
+full `{win, amount, symbols}` result shape (rather than collapsing to a bare `'win' | 'loss'`)
+because exact balance-arithmetic verification is real, existing test coverage this project keeps.
 
 ## Deterministic mocking
 
-Win, loss, and server-error scenarios are produced by intercepting `/api/game/spin` with
-`page.route()` and fixed, typed response bodies (`data/gameTestData.ts`) — the same mechanism a
-test would use against any real backend. There is no `Math.random()` patching and no
-`forceWin()`-style shortcut.
+```ts
+await startedGame.setNextSpinResult("win"); // | "loss" | "error"
+```
+
+Internally, `GamePage.setNextSpinResult()` intercepts `/api/game/spin` with `page.route()` and a
+fixed, typed response body - the same mechanism a test would use against any real backend. There's
+no `Math.random()` patching and no `forceWin()`-style shortcut on the bridge.
+
+**This is deliberately a true one-shot mock.** `page.route()` does not replace a previously
+registered handler for the same pattern - each call stacks a new one, and only the most recently
+registered handler runs (confirmed directly: an "older" handler that isn't superseded is still
+reachable via `route.fallback()`). The handler here unroutes itself immediately after fulfilling -
+fulfill first, then unroute, since unrouting first makes Playwright auto-resolve the route and the
+subsequent `fulfill()` throws `"Route is already handled!"`. That makes `setNextSpinResult()`
+apply to exactly one request no matter how many times it's called in a test, rather than leaving
+every prior handler registered and merely shadowed.
 
 ## State synchronization
 
 No `waitForTimeout()`, no manual `sleep()`, no arbitrary delays. Tests rely on:
 
 - Playwright's built-in auto-waiting for DOM actions;
-- `page.waitForResponse()` for the real network round trip;
-- `expect.poll()` inside `PixiDriver.waitForPhase()` to observe the bridge's `GameSnapshot.phase`;
+- `page.waitForResponse()` for a real (unmocked) network round trip;
+- `expect.poll()` inside `PixiController.waitForPhase()` to observe the bridge's
+  `GameSnapshot.phase`;
 - `page.waitForFunction()` to wait for the bridge to attach and report ready.
 
-## Scenarios (11 tests)
+The spec never knows any of this is happening - it just calls `spin()` and `verifyWin()`.
 
-**game-start.spec.ts** — the Spin button isn't a DOM element; starting the game reaches `ready`
-with the entered player name; the Spin button resolves via its stable Pixi label with valid,
-visible, renderable bounds.
+## Scenarios
 
-**game-spin.spec.ts** — deterministic win and loss (phase + result + balance checked together); a
-real request hits `/api/game/spin`; a repeated click while spinning doesn't deduct the bet twice;
-bounds stay stable across a spin cycle; the Spin button remains clickable when the canvas is
-CSS-scaled to half its render resolution.
+10 tests in `e2e/game.spec.ts`, grouped by `describe`:
 
-**game-errors.spec.ts** — a failed spin refunds the bet, moves to an `error` phase, and the game
-can be spun again immediately afterward; an unknown Pixi object throws a diagnosable error
-(requested label + current game snapshot + canvas geometry, not the whole Pixi stage).
+**Game start** — a player can start the game (nickname reaches the bridge, phase reaches `ready`);
+the Spin button resolves via its stable Pixi label with valid, visible, renderable bounds.
+
+**Spin** — deterministic win and loss (phase + result + exact balance arithmetic checked
+together); a failed spin refunds the bet, moves to an `error` phase, and the game is genuinely
+spinnable again immediately afterward (proven by completing a real subsequent win, not just
+checking the error went away); a repeated click while already spinning doesn't deduct the bet
+twice.
+
+**Technical regressions** — scenarios that are real coverage but don't read naturally as business
+behavior, kept in their own `describe` block rather than forced into business language: an unknown
+Pixi object throws a diagnosable error (requested label, canvas internal/CSS dimensions, current
+phase, known labels - never the whole Pixi stage); the Spin button remains clickable when the
+canvas is CSS-scaled to half its render resolution; the Spin button's bounds stay stable across a
+full spin cycle; a real, unmocked request reaches `/api/game/spin` with the expected response
+shape.
+
+One scenario from an earlier version of this project - a test proving DOM selectors can't find the
+Spin button - was intentionally dropped rather than ported. It didn't verify application
+correctness, only a structural fact about Canvas rendering that every other test already
+demonstrates implicitly (they all interact through `PixiController`, never a DOM selector).
 
 ## Running locally
 
@@ -172,35 +264,33 @@ APP_BASE_URL=https://pixijs-e2e-testing-demo.vercel.app npm test
 
 Two options were considered for how CI reaches the application:
 
-- **(A) Test the deployed Vercel demo.** Simplest to wire up (`baseURL` pointing at the live URL),
-  but ties every CI run to whatever happens to be currently deployed - which may lag behind the
-  application repo's `main` branch (confirmed to be the case at the time this project was built:
-  the live deployment was running a pre-rework build of the bridge). It also adds a real network
-  dependency and couples this repo's CI to Vercel's uptime and the app repo's deploy cadence,
-  neither of which this repo controls.
-- **(B) Check out the application repository and start it locally.** Slightly more setup (an
-  extra `actions/checkout` step, installing `demo-app`'s dependencies, waiting for the dev server),
-  but tests the actual current application source, deterministically, on every run - independent
-  of deployment state or timing.
+- **(A) Test the deployed Vercel demo.** Simplest to wire up, but ties every CI run to whatever
+  happens to be currently deployed - which has lagged behind the application repo's `main` branch
+  before. It also adds a real network dependency and couples this repo's CI to Vercel's uptime.
+- **(B) Check out the application repository and start it locally.** Slightly more setup, but
+  tests the actual current application source, deterministically, on every run.
 
 **(B) was chosen.** `.github/workflows/e2e.yml` checks out `testomut/pixijs-e2e-testing-demo` into
 `app/`, installs `app/demo-app`, starts it with `npm run dev` (the mocked `/api/game/spin`
 endpoint is Vite dev-server middleware, not present in a `vite preview` static build), waits for
-it to respond, then runs this repo's lint/format/typecheck/Playwright suite against it.
+it to respond, then runs this repo's lint/format/typecheck/Playwright suite against it. `app/` is
+excluded from this project's ESLint/Prettier/TypeScript configs, since it's the application repo's
+own code, not this project's.
 
 ## Diagnostics
 
-- **Screenshots** on failure, **video** retained on failure, **trace** retained on failure
-  (`retain-on-failure` rather than `on-first-retry`, so a first-attempt local failure with 0
-  retries still gets a trace) - all uploaded as CI artifacts.
-- `PixiDriver` errors include the requested label, the current `GameSnapshot`, and canvas geometry
-  - never the whole Pixi stage.
+- **Screenshots** and **video** retained on failure, **trace** retained on failure
+  (`retain-on-failure`, so a first-attempt local failure with 0 retries still gets a trace) - all
+  uploaded as CI artifacts.
+- `PixiController` errors include the requested label, canvas internal dimensions, canvas CSS
+  dimensions, the current game phase, and the object bounds where available - never the whole Pixi
+  stage.
 - `npm run test:report` opens the HTML report locally after a run.
 
 ## Limitations
 
 - This repository owns no application code - if the bridge shape or object labels change in
-  `pixijs-e2e-testing-demo`, `types/pixiTestBridge.ts` and `utils/diagnostics.ts`'s label list here
+  `pixijs-e2e-testing-demo`, `types/pixi.types.ts` and `PixiController`'s known-label list here
   need to be updated by hand; nothing enforces that they stay in sync.
 - CI always tests the application repository's current `main`, not a pinned version - a breaking
   change there can break this repo's CI without a corresponding change here.
