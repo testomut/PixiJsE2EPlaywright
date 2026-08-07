@@ -16,10 +16,9 @@ export default tseslint.config(
     plugins: { playwright },
     rules: {
       ...playwright.configs["flat/recommended"].rules,
-      // The domain assertions live in assertions/GameAssertions.ts as
-      // expectWinningResult/expectLosingResult/etc, not inline expect()
-      // calls in every spec.
-      "playwright/expect-expect": ["warn", { assertFunctionPatterns: ["^expect[A-Z]"] }],
+      // Assertions live inside GamePage's verifyWin/verifyLoss/etc methods,
+      // not as inline expect() calls in the spec.
+      "playwright/expect-expect": ["warn", { assertFunctionPatterns: ["^verify[A-Z]"] }],
     },
   },
   prettier,
