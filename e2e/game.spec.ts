@@ -12,6 +12,17 @@ test.describe("Pixi.js game", () => {
     await startedGame.verifySpinButtonIsInteractable();
   });
 
+  test("the reels display is visible on the game board", async ({ startedGame }) => {
+    await startedGame.verifyReelsDisplayIsVisible();
+  });
+
+  test("the bet amount can be adjusted with the bet buttons", async ({ startedGame }) => {
+    await startedGame.increaseBet();
+    await startedGame.verifyBetAmount(15);
+    await startedGame.decreaseBet();
+    await startedGame.verifyBetAmount(10);
+  });
+
   test("player completes a winning spin", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("win");
     await startedGame.spin();

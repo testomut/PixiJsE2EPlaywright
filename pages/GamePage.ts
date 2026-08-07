@@ -147,6 +147,27 @@ export class GamePage {
     expect(bounds.height).toBeGreaterThan(0);
   }
 
+  async increaseBet(): Promise<void> {
+    await this.pixi.click(this.betPlusButton);
+  }
+
+  async decreaseBet(): Promise<void> {
+    await this.pixi.click(this.betMinusButton);
+  }
+
+  async verifyBetAmount(expected: number): Promise<void> {
+    const snapshot = await this.pixi.getSnapshot();
+    expect(snapshot.betAmount).toBe(expected);
+  }
+
+  async verifyReelsDisplayIsVisible(): Promise<void> {
+    const bounds = await this.pixi.getBounds(this.reelsDisplay);
+    expect(bounds.visible).toBe(true);
+    expect(bounds.renderable).toBe(true);
+    expect(bounds.width).toBeGreaterThan(0);
+    expect(bounds.height).toBeGreaterThan(0);
+  }
+
   /**
    * Checks the complete win/loss outcome: phase, the structured result,
    * the literal text shown to the player, and exact balance arithmetic -
