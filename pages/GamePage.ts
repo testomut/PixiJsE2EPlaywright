@@ -1,6 +1,6 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { PixiController } from "../support/PixiController.js";
-import type { GameResult, SpinResult } from "../types/game.types.js";
+import type { GameResult, SpinMockResult } from "../types/game.types.js";
 import type { PixiObjectLabel } from "../types/pixi.types.js";
 
 const SPIN_API_PATTERN = "**/api/game/spin";
@@ -8,7 +8,7 @@ const SPIN_API_PATTERN = "**/api/game/spin";
 // Deterministic response bodies for setNextSpinResult() - small and
 // specific enough to live here rather than in a separate data module.
 const SPIN_RESPONSES: Record<
-  SpinResult,
+  SpinMockResult,
   { status: number; body?: { win: boolean; amount: number; symbols: string[] } }
 > = {
   win: { status: 200, body: { win: true, amount: 100, symbols: ["💎", "💎", "💎"] } },
@@ -17,8 +17,11 @@ const SPIN_RESPONSES: Record<
 };
 
 // The exact copy GameApp.ts sets on its result label - confirmed by
-// reading the application source, not guessed. Kept next to
-// SPIN_RESPONSES since the win text is derived from the same amount.
+// reading the application source, not guessed. WIN_TEXT is a function
+// rather than a plain string because the real copy includes the won
+// amount ("WIN! +$100") - a Record<GameResult, string> would have to
+// hardcode one specific amount, which wouldn't be the real text for any
+// other amount.
 const WIN_TEXT = (amount: number) => `WIN! +$${amount}`;
 const LOSS_TEXT = "No win - try again!";
 const API_ERROR_TEXT = "Spin failed - please try again";
@@ -62,7 +65,7 @@ export class GamePage {
    * this genuinely applies to exactly one request, however many times
    * it's called.
    */
-  async setNextSpinResult(result: SpinResult): Promise<void> {
+  async setNextSpinResult(result: SpinMockResult): Promise<void> {
     const response = SPIN_RESPONSES[result];
     const handler = async (route: Route) => {
       await route.fulfill({
@@ -77,29 +80,33 @@ export class GamePage {
 
   /**
    * One complete user action: click, then prove the spin genuinely
-   * animates (phase reaches "spinning") before returning only once it
-   * has actually finished (phase leaves "spinning" again). Only valid
-   * for outcomes the real application actually animates - confirmed by
-   * testing, a mocked API error resolves the fetch before the "spinning"
-   * phase becomes observable at all (the app's error path has no
-   * animation step, unlike win/loss's ~2.4s reel animation), so
-   * triggering an error goes through attemptSpin() instead.
+   * animates - both the phase reaching "spinning" AND the reel symbols
+   * actually changing (confirmed by inspecting the app: reelsDisplay
+   * itself never moves, only its child texts' content does, so phase
+   * alone can't prove a visual change happened) - before returning only
+   * once the animation has genuinely finished (phase leaves "spinning").
+   * Only valid for outcomes the real application actually animates - a
+   * mocked API error resolves before "spinning" becomes observable at
+   * all (confirmed by testing: the app's error path has no animation
+   * step), so triggering an error uses spinExpectingError() instead.
    */
   async spin(): Promise<void> {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
+    const reelsBeforeClick = await this.pixi.getReelSymbols();
+
     await this.pixi.click("spinButton");
     await this.pixi.waitForPhase("spinning");
+    await this.pixi.waitForReelChange(reelsBeforeClick);
     await this.pixi.waitWhilePhase("spinning");
   }
 
   /**
    * Clicks Spin without asserting an animation lifecycle. Exists
-   * specifically for scenarios (a mocked API error) where the real
+   * specifically for the mocked-API-error scenario, where the real
    * application has no observable "spinning" duration to prove - the
-   * caller synchronizes on whatever it actually expects next instead
-   * (see verifyApiError()).
+   * caller synchronizes on "error" directly instead (see verifyApiError()).
    */
-  async attemptSpin(): Promise<void> {
+  async spinExpectingError(): Promise<void> {
     this.balanceBeforeSpin = (await this.pixi.getSnapshot()).balance;
     await this.pixi.click("spinButton");
   }
@@ -131,16 +138,17 @@ export class GamePage {
   async verifyResult(result: GameResult): Promise<void> {
     const snapshot = await this.pixi.getSnapshot();
     const balanceBefore = this.requireBalanceBeforeSpin();
-    const expectedBody = SPIN_RESPONSES[result].body;
+    const expectedAmount = SPIN_RESPONSES[result].body?.amount ?? 0;
 
     expect(snapshot.phase).toBe("result");
     expect(
       snapshot.lastResult?.win,
       `expected ${result}, got ${JSON.stringify(snapshot.lastResult)}`,
     ).toBe(result === "win");
-    expect(snapshot.resultText).toBe(
-      result === "win" ? WIN_TEXT(expectedBody?.amount ?? 0) : LOSS_TEXT,
-    );
+
+    const resultText = await this.pixi.getText("resultText");
+    expect(resultText).toBe(result === "win" ? WIN_TEXT(expectedAmount) : LOSS_TEXT);
+
     expect(snapshot.balance).toBe(
       balanceBefore - snapshot.betAmount + (snapshot.lastResult?.amount ?? 0),
     );
@@ -154,7 +162,9 @@ export class GamePage {
     // The spin never completed server-side, so the bet must be refunded -
     // not left deducted with no result to show for it.
     expect(snapshot.balance).toBe(balanceBefore);
-    expect(snapshot.resultText).toBe(API_ERROR_TEXT);
+
+    const resultText = await this.pixi.getText("resultText");
+    expect(resultText).toBe(API_ERROR_TEXT);
   }
 
   /** A click that lands while already spinning must not deduct the bet twice. */
@@ -191,13 +201,16 @@ export class GamePage {
   /** The Spin button's bounds must not drift across a full spin cycle. */
   async verifyButtonPositionStableAcrossSpin(): Promise<void> {
     const before = await this.pixi.getBounds("spinButton");
-    await this.pixi.click("spinButton");
-    await this.pixi.waitForPhase("ready");
+    await this.spin();
     const after = await this.pixi.getBounds("spinButton");
     expect(after).toEqual(before);
   }
 
-  /** Bounds validation and click conversion must both hold when the canvas is CSS-scaled. */
+  /**
+   * Bounds validation, coordinate conversion, the real click, and the
+   * complete animation lifecycle must all still hold once the canvas is
+   * CSS-scaled to a different size than its render resolution.
+   */
   async verifyScaledCanvasInteraction(): Promise<void> {
     await this.page.locator("canvas").evaluate((el: HTMLCanvasElement) => {
       el.style.width = `${el.width / 2}px`;
@@ -207,9 +220,7 @@ export class GamePage {
     const bounds = await this.pixi.getBounds("spinButton");
     expect(bounds.width).toBeGreaterThan(0);
 
-    await this.pixi.click("spinButton");
-    await this.pixi.waitForPhase("spinning");
-    await this.pixi.waitForPhase("result");
+    await this.spin();
   }
 
   /** An unknown Pixi object must fail with a useful, non-generic error. */
@@ -223,7 +234,7 @@ export class GamePage {
   private requireBalanceBeforeSpin(): number {
     if (this.balanceBeforeSpin === null) {
       throw new Error(
-        "No balance recorded before this spin - verifyResult/verifyApiError must be called after spin()/attemptSpin().",
+        "No balance recorded before this spin - verifyResult/verifyApiError must be called after spin()/spinExpectingError().",
       );
     }
     return this.balanceBeforeSpin;

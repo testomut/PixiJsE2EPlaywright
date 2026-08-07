@@ -26,7 +26,7 @@ test.describe("Pixi.js game", () => {
 
   test("player sees an API error and can spin again afterward", async ({ startedGame }) => {
     await startedGame.setNextSpinResult("error");
-    await startedGame.attemptSpin();
+    await startedGame.spinExpectingError();
     await startedGame.verifyApiError();
 
     // A fresh mocked response proves the game is genuinely usable again,

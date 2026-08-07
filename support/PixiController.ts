@@ -1,27 +1,21 @@
 import { expect, type Page } from "@playwright/test";
 import type { GamePhase, GameSnapshot } from "../types/game.types.js";
-import type { PixiObjectLabel, PixiObjectBounds } from "../types/pixi.types.js";
+import type {
+  ButtonLabel,
+  TextLabel,
+  PixiObjectLabel,
+  PixiObjectBounds,
+} from "../types/pixi.types.js";
+import { KNOWN_LABELS } from "../types/pixi.types.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
-
-// Mirrors the labels the application registers in its namedObjects map -
-// kept here only to make diagnostics useful, not as a structural
-// dependency on the application.
-const KNOWN_LABELS: readonly PixiObjectLabel[] = [
-  "spinButton",
-  "reelsDisplay",
-  "balanceDisplay",
-  "stateDisplay",
-  "resultText",
-  "betMinus",
-  "betPlus",
-];
 
 /**
  * The only Pixi/Canvas-specific abstraction in this project: waiting for
  * the test bridge, resolving an object's real bounds into a browser
- * click, and polling game phase. Knows nothing about business outcomes
- * like wins, losses, or balances - that belongs to GamePage.
+ * click, reading displayed text/reel state, and polling game phase.
+ * Knows nothing about business outcomes like wins, losses, or balances -
+ * that belongs to GamePage.
  */
 export class PixiController {
   constructor(private readonly page: Page) {}
@@ -90,11 +84,13 @@ export class PixiController {
 
   /**
    * Clicks the center of a Pixi object's global bounds through a real
-   * pointer event. The bridge returns render-space bounds; converting
-   * them into browser viewport coordinates is this controller's
-   * responsibility, not the application's.
+   * pointer event. Only accepts ButtonLabel - clicking a text or display
+   * object would be meaningless, and TypeScript now rejects it statically.
+   * The bridge returns render-space bounds; converting them into browser
+   * viewport coordinates is this controller's responsibility, not the
+   * application's.
    */
-  async click(label: PixiObjectLabel): Promise<void> {
+  async click(label: ButtonLabel): Promise<void> {
     const bounds = await this.getBounds(label);
 
     if (!bounds.visible || !bounds.renderable) {
@@ -124,6 +120,34 @@ export class PixiController {
     const browserY = canvasBox.y + renderY * scaleY;
 
     await this.page.mouse.click(browserX, browserY);
+  }
+
+  /**
+   * Reads the serializable text currently displayed by a Text-bearing
+   * object. Only accepts TextLabel - a button or the reels display isn't
+   * a single piece of text, and TypeScript now rejects it statically.
+   */
+  async getText(label: TextLabel): Promise<string> {
+    const text = await this.page.evaluate(
+      (objectLabel) => window.__TEST_APP__?.getObjectText(objectLabel) ?? null,
+      label,
+    );
+    if (text === null) {
+      const diagnostics = await this.describeFailure(label);
+      throw new Error(`Pixi object "${label}" has no readable text.\n${diagnostics}`);
+    }
+    return text;
+  }
+
+  /**
+   * The reels display's three current symbols. This is the only
+   * genuinely animated visual state in the application - reelsDisplay
+   * itself never moves, only its child texts' content changes - so it's
+   * exposed directly rather than generalized into a getDisplayState(label)
+   * that would have exactly one real caller.
+   */
+  async getReelSymbols(): Promise<string[]> {
+    return this.page.evaluate(() => window.__TEST_APP__?.getReelSymbols() ?? []);
   }
 
   async getSnapshot(): Promise<GameSnapshot> {
@@ -165,6 +189,28 @@ export class PixiController {
       throw new Error(`Timed out waiting to leave phase "${phase}".\n${diagnostics}`, {
         cause: error,
       });
+    }
+  }
+
+  /**
+   * Polls until the reel symbols differ from `previous` - proof that the
+   * spin animation is genuinely progressing visually, not just that a
+   * phase flag flipped. Confirmed by inspecting the application: reels
+   * change every 80-200ms while spinning, so this settles quickly when
+   * a real animation is running.
+   */
+  async waitForReelChange(
+    previous: readonly string[],
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  ): Promise<void> {
+    try {
+      await expect.poll(() => this.getReelSymbols(), { timeout: timeoutMs }).not.toEqual(previous);
+    } catch (error) {
+      const diagnostics = await this.describeFailure();
+      throw new Error(
+        `Timed out waiting for reel symbols to change from ${JSON.stringify(previous)}.\n${diagnostics}`,
+        { cause: error },
+      );
     }
   }
 

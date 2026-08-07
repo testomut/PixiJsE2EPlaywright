@@ -4,11 +4,11 @@
 // would misrepresent that source type.
 export type GamePhase = "booting" | "ready" | "spinning" | "result" | "error";
 
-/** What the next mocked spin should do - see GamePage.setNextSpinResult(). */
-export type SpinResult = "win" | "loss" | "error";
-
-/** The business-level outcome verifyResult() checks - deliberately narrower than SpinResult, since an API error isn't a "result" to assert on the same way. */
+/** The business-level outcome verifyResult() checks. An API error isn't a "result" to assert on the same way - see SpinMockResult. */
 export type GameResult = "win" | "loss";
+
+/** What the next mocked spin should do - see GamePage.setNextSpinResult(). Wider than GameResult because a mock can also simulate a failed request. */
+export type SpinMockResult = GameResult | "error";
 
 export interface Player {
   nickname: string;
@@ -24,14 +24,12 @@ export interface SpinOutcome {
 // Includes betAmount and the full SpinOutcome (not just a 'win'/'loss'
 // flag) because verifying exact balance arithmetic after a spin is real,
 // existing test coverage this project keeps - not an invented field.
+// Displayed text (resultText, etc.) is read separately via
+// PixiController.getText() rather than duplicated in here - see README.
 export interface GameSnapshot {
   phase: GamePhase;
   playerName: string;
   balance: number;
   betAmount: number;
   lastResult: SpinOutcome | null;
-  // The literal text currently shown in the result label, mirrored from
-  // the application's GameSnapshot.resultText - lets tests confirm the
-  // actual displayed copy, not just the structured outcome.
-  resultText: string;
 }

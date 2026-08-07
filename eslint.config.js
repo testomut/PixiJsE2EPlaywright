@@ -16,8 +16,8 @@ export default tseslint.config(
     plugins: { playwright },
     rules: {
       ...playwright.configs["flat/recommended"].rules,
-      // Assertions live inside GamePage's verifyWin/verifyLoss/etc methods,
-      // not as inline expect() calls in the spec.
+      // Assertions live inside GamePage's verifyResult/verifyApiError/etc
+      // methods, not as inline expect() calls in the spec.
       "playwright/expect-expect": ["warn", { assertFunctionPatterns: ["^verify[A-Z]"] }],
     },
   },
