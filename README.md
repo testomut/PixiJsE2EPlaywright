@@ -1,5 +1,3 @@
-> **This project has moved to [testomut/playwright](https://github.com/testomut/playwright/tree/main/js/PixiJsE2EPlaywright)**, together with its full history. This repository is archived and kept read-only so existing links keep working.
-
 # Pixi.js E2E Automation — Playwright
 
 A small, strongly typed Playwright test-automation project for the Pixi.js/Canvas demo game in
